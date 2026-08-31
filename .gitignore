@@ -10,3 +10,6 @@ env/
 *.sqlite3
 .DS_Store
 Thumbs.db
+# Model weights
+models/*.onnx
+models/*.pt

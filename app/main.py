@@ -3,84 +3,94 @@ load_dotenv()
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, File, UploadFile, Form, HTTPException
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from app.db.database import get_db, engine, Base
 from app.db.models import Inspection
 from app.ml.inference import PCBDefectModel
 
-# Global dictionary to hold the warmed-up model
 ml_engine = {}
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Executes exactly once on server startup
     ml_engine["model"] = PCBDefectModel()
     yield
-    # Cleans up resources on server shutdown
     ml_engine.clear()
-
 
 app = FastAPI(title="PCB Defect Auditor", lifespan=lifespan)
 
 Base.metadata.create_all(bind=engine)
 
-
 @app.get("/")
 def root():
     return {"status": "PCB Defect Auditor is running"}
-
 
 @app.get("/inspections")
 def list_inspections(db: Session = Depends(get_db)):
     return db.query(Inspection).all()
 
-
-@app.post("/inspect")
+@app.post("/inspect", responses={
+    400: {"description": "Invalid file type or corrupted image"}
+})
 async def inspect_pcb(
     board_id: str = Form(...),
     file: UploadFile = File(...),
     db: Session = Depends(get_db)
 ):
-    # 0. Basic input validation
-    if not file.content_type or not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Uploaded file must be an image")
-
-    # 1. Ingestion
-    image_bytes = await file.read()
-
-    if len(image_bytes) == 0:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty")
-
-    # 2. Inference
-    try:
-        prediction = ml_engine["model"].predict(image_bytes)
-    except Exception:
+    # 1. Validate file type
+    if not file.content_type.startswith("image/"):
         raise HTTPException(
-            status_code=422,
-            detail="Inference failed — the file may be corrupted or not a valid image"
+            status_code=400, 
+            detail=f"Invalid file type: {file.content_type}. Please upload a JPEG or PNG."
         )
 
-    # 3. Persistence
-    new_inspection = Inspection(
-        board_id=board_id,
-        image_path=file.filename,  # filename only — image itself is not persisted to storage
-        defect_type=prediction["defect_type"],
-        confidence=prediction["confidence"],
-        processing_ms=prediction["processing_ms"]
-    )
+    # 2. Read raw bytes
+    file_bytes = await file.read()
 
+    # 3. Run ONNX Inference and extract dictionary values safely
     try:
+        prediction_result = ml_engine["model"].predict(file_bytes)
+        defect_type = prediction_result["defect_type"]
+        confidence_float = float(prediction_result["confidence"])
+        processing_ms = int(prediction_result["processing_ms"])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except TypeError as e:
+        # Fallback just in case predict() returns a tuple instead of a dictionary
+        raise HTTPException(status_code=500, detail="Model returned an unexpected data format.")
+
+    # 4. Flag low-confidence predictions
+    requires_human_review = bool(confidence_float < 0.50)
+
+    # 5. Database logging
+    try:
+        new_inspection = Inspection(
+            board_id=board_id,
+            image_path=file.filename,
+            defect_type=defect_type,
+            confidence=confidence_float,
+            processing_ms=processing_ms
+        )
         db.add(new_inspection)
         db.commit()
-        db.refresh(new_inspection)
-    except Exception:
+    except SQLAlchemyError as e:
+        print(f"Database error: {e}")
         db.rollback()
-        raise HTTPException(status_code=500, detail="Failed to log inspection result to database")
+        return {
+            "status": "partial_success",
+            "warning": "Inference succeeded but database logging failed.",
+            "board_id": board_id,
+            "telemetry": {"defect_type": defect_type, "confidence": round(confidence_float, 4)}
+        }
 
-    # 4. Response
+    # 6. Final Response
     return {
         "status": "success",
         "board_id": board_id,
-        "telemetry": prediction
+        "requires_human_review": requires_human_review,
+        "telemetry": {
+            "defect_type": defect_type,
+            "confidence": round(confidence_float, 4),
+            "processing_ms": processing_ms
+        }
     }

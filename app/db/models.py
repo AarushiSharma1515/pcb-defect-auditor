@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, Numeric, DateTime, text
+from sqlalchemy import Column, Integer, String, Text, Numeric, DateTime, func
 from app.db.database import Base
 
 class Inspection(Base):
@@ -9,5 +9,5 @@ class Inspection(Base):
     image_path = Column(Text, nullable=False)
     defect_type = Column(String(50), nullable=False, index=True)
     confidence = Column(Numeric(5, 4), nullable=False)
-    inspected_at = Column(DateTime(timezone=True), server_default=text('NOW()'), index=True)
+    inspected_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     processing_ms = Column(Integer)

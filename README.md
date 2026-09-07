@@ -32,6 +32,15 @@ Neon Postgres — inspections table
 - **Storage:** Neon (serverless Postgres) — chosen specifically to sidestep local Docker setup issues during development, and it turned out to be a genuinely good fit for a small project like this.
 
 ---
+## Core Engineering & Security Decisions
+1. Deep Payload Validation (Zero-Trust Decoding)
+Trusting client-provided HTTP headers (such as content-type: image/jpeg) presents a critical security vulnerability. This architecture enforces a physical decode of the raw byte stream using cv2.imdecode at the processing layer. If a malicious script or corrupted byte array is injected, it fails mathematical tensor conversion and is explicitly rejected before interacting with the ONNX inference engine.
+
+2. GUI-Less Containerization
+The deployment environment is stripped of all OS-level display dependencies (e.g., libgl1). By leveraging opencv-python-headless, the Docker image footprint is drastically reduced, mitigating supply-chain vulnerabilities and ensuring the container remains strictly optimized for backend server operations.
+
+3. Environment-Aware Simulation Mode
+To maintain a robust CI/CD pipeline without exposing proprietary .onnx model weights to cloud runners, the ML engine features a deterministic fallback execution path. If raw weights are absent, the system boots into Simulation Mode, maintaining strict payload validation and standardizing JSON responses to guarantee accurate end-to-end integration testing.
 
 ## Defect classes
 
@@ -108,12 +117,22 @@ pcb-defect-auditor/
 
 Getting to a working model took two failed attempts before this one worked, and I'm leaving that in rather than pretending it was smooth:
 
-1. First attempt used a Roboflow-hosted export of PKU-Market-PCB. The `data.yaml` class names had somehow been replaced with Roboflow's own boilerplate text instead of real defect labels — I only caught it after 50 epochs of training produced mAP50 near zero, then visually checked a labeled image against its annotations and found the boxes didn't correspond to any real defect class.
-2. Second attempt with DeepPCB initially failed with "no labels found" — the raw download didn't include YOLO-format annotations at all.
-3. Third attempt, using a properly YOLO-formatted DeepPCB export, is the one that actually worked — the results above are from that run.
+First attempt used a Roboflow-hosted export of PKU-Market-PCB. The data.yaml class names had somehow been replaced with Roboflow's own boilerplate text instead of real defect labels.
 
-`scripts/convert_labels.py` documents the fix for the label formatting. If you're working with either of these public datasets, it's worth verifying the annotations visually before trusting a training run's metrics — a model can train "successfully" (loss decreasing, no errors) against completely wrong labels and only the metrics reveal it.
+Second attempt with DeepPCB initially failed with "no labels found" — the raw download didn't include YOLO-format annotations at all.
 
+Third attempt, using a properly YOLO-formatted DeepPCB export, is the one that actually worked.
+
+scripts/convert_labels.py documents the fix for the label formatting.
+
+## CI/CD Pipeline
+Continuous Integration is enforced via GitHub Actions on Ubuntu runners:
+
+1.Environment Provisioning: Installs Python 3.12 and GUI-less dependencies.
+
+2.Automated Testing: Executes the pytest suite against a mocked SQLite memory database.
+
+3.Container Build Verification: Compiles the Dockerfile to validate Debian OS compatibility and image integrity prior to production deployment.
 ---
 
 ## Running it locally

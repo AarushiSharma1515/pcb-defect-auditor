@@ -13,13 +13,12 @@ ml_engine = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    Base.metadata.create_all(bind=engine)
     ml_engine["model"] = PCBDefectModel()
     yield
     ml_engine.clear()
 
 app = FastAPI(title="PCB Defect Auditor", lifespan=lifespan)
-
-Base.metadata.create_all(bind=engine)
 
 @app.get("/")
 def root():

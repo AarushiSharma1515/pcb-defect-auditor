@@ -50,9 +50,12 @@ def test_inspect_missing_board_id(client):
 
 
 def test_inspect_corrupted_image(client):
-    files = {"file": ("corrupted.jpg", b"not real image data", "image/jpeg")}
-    data = {"board_id": "test_board_002"}
-    response = client.post("/inspect", data=data, files=files)
+    # Send random bytes instead of a real image
+    response = client.post(
+        "/inspect/",
+        data={"board_id": "BRD-999"},
+        files={"file": ("corrupt.jpg", b"not a real image", "image/jpeg")}
+    )
     assert response.status_code == 400
 
 

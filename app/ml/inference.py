@@ -92,6 +92,10 @@ class PCBDefectModel:
 
     def predict(self, image_bytes: bytes) -> dict:
         start_time = time.perf_counter()
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            raise ValueError("Could not decode image — file may be corrupted or not a valid image")
 
         if self.use_real_model:
             # Real ONNX Execution Pipeline
@@ -105,11 +109,8 @@ class PCBDefectModel:
         else:
             # Simulation Pipeline (Fallback — used only if weights file is missing)
             time.sleep(random.uniform(0.01, 0.04))
-            predicted_defect = random.choices(
-                self.defect_classes, weights=[1] * len(self.defect_classes)
-            )[0]
+            predicted_defect = random.choices(self.defect_classes, weights=[1] * len(self.defect_classes))[0]
             confidence = round(random.uniform(0.85, 0.99), 4)
-
         end_time = time.perf_counter()
 
         return {

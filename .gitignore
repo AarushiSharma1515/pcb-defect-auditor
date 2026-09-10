@@ -11,5 +11,6 @@ env/
 .DS_Store
 Thumbs.db
 # Model weights
-models/*.onnx
 models/*.pt
+models/*.onnx
+!models/pcb_defect_v1.onnx

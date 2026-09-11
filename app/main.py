@@ -60,7 +60,6 @@ async def inspect_pcb(
 
     # 4. Flag low-confidence predictions
     requires_human_review = bool(confidence_float < 0.50)
-
     # 5. Database logging
     try:
         new_inspection = Inspection(
@@ -77,20 +76,24 @@ async def inspect_pcb(
         db.rollback()
         return {
             "status": "partial_success",
-            "warning": "Inference succeeded but database logging failed.",
+            "message": "Inference completed but database logging failed.",
             "board_id": board_id,
-            "telemetry": {"defect_type": defect_type, "confidence": round(confidence_float, 4)}
+            "requires_human_review": requires_human_review,
+            "telemetry": {
+                "defect_type": defect_type,
+                "confidence": round(confidence_float, 4),
+                "processing_ms": processing_ms
+            }
         }
 
-    # 6. Final Response
+    # 6. Final Response (Standard Success)
     return {
-        "status": "partial_success",
-        "message": "Inference completed but database logging failed.",
+        "status": "success",
         "board_id": board_id,
-        "requires_human_review": confidence < CONFIDENCE_THRESHOLD, # Add this line
+        "requires_human_review": requires_human_review,
         "telemetry": {
             "defect_type": defect_type,
-            "confidence": float(confidence),
+            "confidence": round(confidence_float, 4),
             "processing_ms": processing_ms
         }
     }

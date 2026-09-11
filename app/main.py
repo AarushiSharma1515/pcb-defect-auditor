@@ -84,12 +84,13 @@ async def inspect_pcb(
 
     # 6. Final Response
     return {
-        "status": "success",
+        "status": "partial_success",
+        "message": "Inference completed but database logging failed.",
         "board_id": board_id,
-        "requires_human_review": requires_human_review,
+        "requires_human_review": confidence < CONFIDENCE_THRESHOLD, # Add this line
         "telemetry": {
             "defect_type": defect_type,
-            "confidence": round(confidence_float, 4),
+            "confidence": float(confidence),
             "processing_ms": processing_ms
         }
     }

@@ -4,6 +4,7 @@ load_dotenv()
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, File, UploadFile, Form, HTTPException
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.db.database import get_db, engine, Base
 from app.db.models import Inspection
@@ -27,6 +28,26 @@ def root():
 @app.get("/inspections")
 def list_inspections(db: Session = Depends(get_db)):
     return db.query(Inspection).all()
+
+@app.get("/analytics/summary")
+def get_analytics_summary(db: Session = Depends(get_db)):
+    # 1. Get total inspections
+    total = db.query(Inspection).count()
+    
+    # 2. Get average confidence across all runs
+    avg_conf = db.query(func.avg(Inspection.confidence)).scalar() or 0.0
+    
+    # 3. Get count breakdown by defect type
+    breakdown = db.query(
+        Inspection.defect_type, 
+        func.count(Inspection.id)
+    ).group_by(Inspection.defect_type).all()
+    
+    return {
+        "total_inspections": total,
+        "average_confidence": round(avg_conf, 4),
+        "defect_breakdown": {row[0]: row[1] for row in breakdown}
+    }
 
 @app.post("/inspect", responses={
     400: {"description": "Invalid file type or corrupted image"}

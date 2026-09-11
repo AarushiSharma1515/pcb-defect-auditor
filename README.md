@@ -1,8 +1,11 @@
 # PCB Defect Auditor
 
+**Live API:** [https://pcb-defect-auditor.onrender.com/docs](https://pcb-defect-auditor.onrender.com/docs)
+*(Hosted on Render's free tier — the first request may take 15–60 seconds to wake the service from sleep. Subsequent requests process in ~3.2–4.2 seconds.)*
+
 An automated optical inspection API for printed circuit boards. A YOLOv8 model, exported to ONNX and served through FastAPI, detects and classifies PCB defects and logs every inspection to a Postgres database (Neon) for later analysis.
 
-Built as a self-directed project to go beyond model training into the full lifecycle: data, training, serving, storage, and (in progress) deployment.
+Built as a self-directed project to go beyond model training into the full lifecycle: data, training, serving, storage, and deployment.
 
 ---
 
@@ -32,15 +35,18 @@ Neon Postgres — inspections table
 - **Storage:** Neon (serverless Postgres) — chosen specifically to sidestep local Docker setup issues during development, and it turned out to be a genuinely good fit for a small project like this.
 
 ---
-## Core Engineering & Security Decisions
-1. Deep Payload Validation (Zero-Trust Decoding)
-Trusting client-provided HTTP headers (such as content-type: image/jpeg) presents a critical security vulnerability. This architecture enforces a physical decode of the raw byte stream using cv2.imdecode at the processing layer. If a malicious script or corrupted byte array is injected, it fails mathematical tensor conversion and is explicitly rejected before interacting with the ONNX inference engine.
 
-2. GUI-Less Containerization
-The deployment environment is stripped of all OS-level display dependencies (e.g., libgl1). By leveraging opencv-python-headless, the Docker image footprint is drastically reduced, mitigating supply-chain vulnerabilities and ensuring the container remains strictly optimized for backend server operations.
+## Core Engineering Decisions
 
-3. Environment-Aware Simulation Mode
-To maintain a robust CI/CD pipeline without exposing proprietary .onnx model weights to cloud runners, the ML engine features a deterministic fallback execution path. If raw weights are absent, the system boots into Simulation Mode, maintaining strict payload validation and standardizing JSON responses to guarantee accurate end-to-end integration testing.
+**Server-side payload validation.** Trusting a client-provided HTTP header (like `content-type: image/jpeg`) isn't enough — a client can set that header to anything regardless of what the file actually contains. This architecture decodes the raw byte stream directly with `cv2.imdecode` before it ever reaches the ONNX inference engine. A corrupted byte array or a mislabeled non-image payload (like a PDF sent with a fake image content-type) fails that decode step and is rejected with a clean `400`, rather than crashing further downstream.
+
+**GUI-less containerization.** The deployment strips OS-level display dependencies (e.g. `libgl1`) by using `opencv-python-headless` instead of full OpenCV. Smaller image, faster builds, no display-server dependencies a backend service never needed in the first place.
+
+**Simulation mode for local development without model weights.** `PCBDefectModel` checks whether the ONNX file exists at startup; if it's missing, it falls back to a randomized simulation path instead of crashing, so the API's request/response contract can still be tested. *Note: since `models/pcb_defect_v1.onnx` is committed to this repo (kept intentionally small at 11.7MB), CI and this deployment both run against the real model, not the simulation fallback — the fallback exists for local development on a fresh clone before the file is present, not for hiding weights from CI.*
+
+**Graceful degradation on database failure.** Inference and persistence are decoupled — if the Neon write fails (observed in practice during a free-tier cold start), the API still returns the real inference result to the caller with a `partial_success` status, instead of losing a successful prediction because of an unrelated storage hiccup.
+
+---
 
 ## Defect classes
 
@@ -52,6 +58,13 @@ The model detects six PCB fabrication defects, trained on the DeepPCB dataset:
 4. **Spur** — unwanted copper protrusion off a trace
 5. **Copper** — residual, unetched copper flakes
 6. **Pin-hole** — voids in a conductive pad or trace
+
+## Known limitations
+
+- **Out-of-distribution inputs can produce confident false positives.** The model was trained strictly on the DeepPCB distribution and has no "not a PCB" class — feeding it an unrelated image doesn't reliably get rejected. Tested directly: an unrelated non-PCB image returned `"Spur"` at 0.44 confidence rather than a clear rejection.
+- **No background/negative class.** There's no dedicated category for "this isn't a defect" — every confident detection gets forced into one of the six known classes.
+- **Content-type validation works correctly for non-image files.** A `.pdf` sent to `/inspect` was correctly rejected with a `400`, confirmed directly against the live deployment.
+- **Latency on free-tier CPU:** end-to-end inference over the network currently measures ~3.2–4.2 seconds per request.
 
 ---
 
@@ -85,9 +98,7 @@ Full numbers and raw per-epoch log: `docs/training_results/metrics.md` and `resu
 
 ![Confusion Matrix](docs/training_results/confusion_matrix_normalized.png)
 
-The diagonal is strong across every class (0.92–0.99), which is the main signal — the model isn't confusing defect types with each other. The real weak spot is the **background column**: Mousebite (0.30) and Open (0.27) are the two classes most often triggered by substrate edges or normal board texture that isn't actually a defect. That's a background-vs-defect problem, not a defect-vs-defect problem, and it's the honest limitation worth calling out rather than glossing over.
-
-**What I haven't measured yet, and won't claim until I have:** real inference latency under load, and any comparison against published DeepPCB baselines. Both are on the roadmap below rather than stated here as numbers I can't currently reproduce.
+The diagonal is strong across every class (0.92–0.99) — the model isn't confusing defect types with each other. The real weak spot is the background column: Mousebite (0.30) and Open (0.27) are the two classes most often triggered by substrate edges or normal board texture that isn't actually a defect. That's a background-vs-defect problem, not a defect-vs-defect problem.
 
 ---
 
@@ -95,44 +106,49 @@ The diagonal is strong across every class (0.92–0.99), which is the main signa
 
 ```
 pcb-defect-auditor/
+├── .github/workflows/       # CI pipeline definitions
 ├── app/
-│   ├── api/             # API route definitions
-│   ├── core/            # Config, database connections, environment settings
-│   ├── db/              # SQLAlchemy schema models
-│   ├── ml/              # ONNX runtime inference session & NMS logic
-│   └── main.py          # FastAPI application entrypoint
-├── docs/
-│   └── training_results/# Confusion matrix, PR curves, and training metrics
+│   ├── api/                 # API route definitions
+│   ├── core/                # Config, environment settings
+│   ├── db/                  # SQLAlchemy models, database connection
+│   ├── ml/                  # ONNX inference session, preprocessing, NMS
+│   └── main.py               # FastAPI application entrypoint
+├── docs/training_results/    # Confusion matrix, PR curve, training metrics
 ├── models/
-│   └── pcb_defect_v1.onnx        # Exported YOLOv8 production model weights
+│   └── pcb_defect_v1.onnx    # Exported YOLOv8 weights (committed — see note below)
+├── notebooks/                 # Full training notebook
 ├── scripts/
-│   └── convert_labels.py# Annotation parser for DeepPCB coordinate mappings
+│   └── convert_labels.py     # Fixes a labeling issue found in the raw dataset
+├── sql/
+│   ├── schema.sql
+│   └── analytics.sql         # Queries for the planned /analytics/summary endpoint
+├── tests/
+├── Dockerfile
 ├── requirements.txt
 └── README.md
 ```
+
+**Note on `models/`:** weight files are normally gitignored, but `pcb_defect_v1.onnx` is committed here as an explicit exception (`!models/pcb_defect_v1.onnx` in `.gitignore`), since Render builds directly from this GitHub repo and needs the file present at build time. At 11.7MB, this is a reasonable tradeoff at this project's scale.
 
 ---
 
 ## A note on the dataset
 
-Getting to a working model took two failed attempts before this one worked, and I'm leaving that in rather than pretending it was smooth:
+Getting to a working model took two failed attempts before this one worked, and that's worth leaving in rather than pretending it was smooth:
 
-First attempt used a Roboflow-hosted export of PKU-Market-PCB. The data.yaml class names had somehow been replaced with Roboflow's own boilerplate text instead of real defect labels.
+1. **First attempt** used a Roboflow-hosted export of PKU-Market-PCB. The `data.yaml` class names had somehow been replaced with Roboflow's own boilerplate text instead of real defect labels — only caught after 50 epochs of training produced mAP50 near zero, then visually checking a labeled image against its actual annotations.
+2. **Second attempt** with DeepPCB initially failed with "no labels found" — the raw download didn't include YOLO-format annotations at all.
+3. **Third attempt**, using a properly YOLO-formatted DeepPCB export, is the one that actually worked — the results above are from that run.
 
-Second attempt with DeepPCB initially failed with "no labels found" — the raw download didn't include YOLO-format annotations at all.
+`scripts/convert_labels.py` documents the fix. The broader lesson: a model can train "successfully" — loss decreasing, no errors — against completely wrong labels, and only a direct visual check against ground truth reveals it.
 
-Third attempt, using a properly YOLO-formatted DeepPCB export, is the one that actually worked.
+---
 
-scripts/convert_labels.py documents the fix for the label formatting.
+## CI/CD & deployment
 
-## CI/CD Pipeline
-Continuous Integration is enforced via GitHub Actions on Ubuntu runners:
+- **Testing:** GitHub Actions runs the `pytest` suite on Ubuntu, using a mocked in-memory SQLite database and a mocked inference call — no live database or model weights required for the test suite itself to pass.
+- **Deployment:** Render pulls this repository directly and builds the Docker image from the committed `Dockerfile`, then runs Uvicorn. This has been verified against a live, successful deploy — see the live link above.
 
-1.Environment Provisioning: Installs Python 3.12 and GUI-less dependencies.
-
-2.Automated Testing: Executes the pytest suite against a mocked SQLite memory database.
-
-3.Container Build Verification: Compiles the Dockerfile to validate Debian OS compatibility and image integrity prior to production deployment.
 ---
 
 ## Running it locally
@@ -151,8 +167,8 @@ pip install -r requirements.txt
 Create a `.env` file in the root:
 ```env
 DATABASE_URL=postgresql://<user>:<password>@<neon-host>/<dbname>?sslmode=require
-MODEL_PATH=models/pcb_defect_v1.onnx
 ```
+(The model path is hardcoded to `models/pcb_defect_v1.onnx` in `inference.py` — no environment variable needed for it.)
 
 Run it:
 ```bash
@@ -178,16 +194,19 @@ Then open `http://127.0.0.1:8000/docs` for the interactive API.
 {
   "status": "success",
   "board_id": "PANEL-004",
+  "requires_human_review": false,
   "telemetry": {
     "defect_type": "Copper",
     "confidence": 0.9142,
-    "processing_ms": 48
+    "processing_ms": 4186
   }
 }
 ```
 
 ---
+
+---
+
 ## Tech stack
 
-Python · FastAPI · SQLAlchemy · PostgreSQL (Neon) · YOLOv8 · ONNX Runtime · OpenCV · pytest · Docker # PCB Defect Auditor
-
+Python · FastAPI · SQLAlchemy · PostgreSQL (Neon) · YOLOv8 · ONNX Runtime · OpenCV · pytest · Docker · GitHub Actions

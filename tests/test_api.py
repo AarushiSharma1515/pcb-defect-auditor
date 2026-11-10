@@ -228,4 +228,38 @@ def test_truncated_jpeg_message_says_it_is_corrupted(client):
     response = client.post("/inspect", data={"board_id": "truncated"},
                            files={"file": ("cut.jpg", truncated, "image/jpeg")})
     assert response.status_code == 400
-    assert "could not be decoded" in response.json()["detail"]
+    assert "truncated or corrupted" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------- size limits
+
+def png_header_only(width: int, height: int) -> bytes:
+    """The first bytes of a PNG that CLAIMS to be width x height, with no pixel data at all.
+    Enough for the header check; it would fail if anyone tried to decode it."""
+    ihdr = width.to_bytes(4, "big") + height.to_bytes(4, "big") + bytes([8, 2, 0, 0, 0])
+    return b"\x89PNG\r\n\x1a\n" + (13).to_bytes(4, "big") + b"IHDR" + ihdr + b"\x00" * 4
+
+
+def test_file_over_10_mb_is_rejected_with_413(client):
+    too_big = make_image(".jpg") + b"\x00" * (10 * 1024 * 1024)
+    response = client.post("/inspect", data={"board_id": "big_file"},
+                           files={"file": ("big.jpg", too_big, "image/jpeg")})
+    assert response.status_code == 413
+    assert "10 MB" in response.json()["detail"]
+
+
+def test_too_many_pixels_is_rejected_before_decoding(client):
+    use_fake_model()
+    from app.main import ml_engine
+    response = client.post("/inspect", data={"board_id": "pixel_bomb"},
+                           files={"file": ("huge.png", png_header_only(12000, 12000), "image/png")})
+    assert response.status_code == 413
+    assert "12000x12000" in response.json()["detail"]
+    ml_engine["model"].predict.assert_not_called()   # rejected from the header alone
+
+
+def test_exactly_25_megapixels_passes_the_pixel_check(client):
+    # 5000 x 5000 = 25,000,000 is allowed; this fake file then fails to decode (400, not 413)
+    response = client.post("/inspect", data={"board_id": "limit"},
+                           files={"file": ("limit.png", png_header_only(5000, 5000), "image/png")})
+    assert response.status_code == 400

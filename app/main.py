@@ -9,7 +9,10 @@ from sqlalchemy.orm import Session
 from app.db.database import get_db, engine, Base
 from app.db.models import Inspection
 from app.ml.inference import PCBDefectModel
-from app.ml.image_checks import detect_image_format
+from app.ml.image_checks import detect_image_format, read_image_size
+
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024   # 10 MB
+MAX_PIXELS = 25_000_000               # 25 megapixels (e.g. 5000 x 5000)
 
 ml_engine = {}
 
@@ -78,15 +81,19 @@ def get_analytics_summary(db: Session = Depends(get_db)):
     }
 
 @app.post("/inspect", responses={
-    400: {"description": "Empty file, not a JPEG/PNG, or a corrupted image"}
+    400: {"description": "Empty file, not a JPEG/PNG, or a corrupted image"},
+    413: {"description": "File over 10 MB or image over 25 megapixels"},
 })
 async def inspect_pcb(
     board_id: str = Form(...),
     file: UploadFile = File(...),
     db: Session = Depends(get_db)
 ):
-    # 1. Read raw bytes. An empty file would crash OpenCV, so reject it here.
-    file_bytes = await file.read()
+    # 1. Read raw bytes, but never more than the limit (+1 byte, so we can tell it was too big).
+    #    An empty file would crash OpenCV, so reject it here.
+    file_bytes = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(file_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="The file is larger than the 10 MB limit.")
     if not file_bytes:
         raise HTTPException(status_code=400, detail="The uploaded file is empty (0 bytes).")
 
@@ -98,6 +105,21 @@ async def inspect_pcb(
             status_code=400,
             detail=(f"The file's content is not a JPEG or PNG image "
                     f"(it was sent as '{file.content_type or 'no content type'}'). Please upload a JPEG or PNG."),
+        )
+
+    # 2b. Check width x height from the file header BEFORE decoding: a small file can
+    #     unpack into a huge image (a 0.5 MB PNG can need 432 MB once decoded).
+    size = read_image_size(file_bytes, image_format)
+    if size is None or 0 in size:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The file looks like a {image_format} but its header could not be read; it is probably truncated or corrupted.",
+        )
+    width, height = size
+    if width * height > MAX_PIXELS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"The image is {width}x{height} pixels; the limit is {MAX_PIXELS // 1_000_000} megapixels.",
         )
 
     # 3. Run ONNX Inference and extract dictionary values safely

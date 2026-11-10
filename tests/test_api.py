@@ -263,3 +263,30 @@ def test_exactly_25_megapixels_passes_the_pixel_check(client):
     response = client.post("/inspect", data={"board_id": "limit"},
                            files={"file": ("limit.png", png_header_only(5000, 5000), "image/png")})
     assert response.status_code == 400
+
+
+# ---------------------------------------------------------------- database down
+
+def unreachable_database(tmp_path):
+    """A real engine whose database can't be opened: a SQLite file inside a folder that
+    doesn't exist. Every connection attempt raises OperationalError, like a down Neon."""
+    return create_engine("sqlite:///" + (tmp_path / "missing_folder" / "x.db").as_posix())
+
+
+def test_app_starts_and_inspects_when_database_is_down(monkeypatch, tmp_path, caplog):
+    import app.main as main_module
+    down = unreachable_database(tmp_path)
+    monkeypatch.setattr(main_module, "engine", down)             # what create_all() uses at startup
+    DownSession = sessionmaker(bind=down)
+    app.dependency_overrides[get_db] = lambda: DownSession()    # what /inspect uses
+    try:
+        with TestClient(app) as down_client:                     # startup must not raise
+            assert down_client.get("/").status_code == 200
+            response = down_client.post("/inspect", data={"board_id": "db_down"},
+                                        files={"file": ("board.jpg", make_image(".jpg"), "image/jpeg")})
+    finally:
+        app.dependency_overrides[get_db] = override_get_db
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "partial_success"       # inference worked, saving didn't
+    assert "Database unavailable at startup" in caplog.text

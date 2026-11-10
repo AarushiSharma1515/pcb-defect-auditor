@@ -1,6 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, File, UploadFile, Form, HTTPException
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
@@ -14,11 +15,22 @@ from app.ml.image_checks import detect_image_format, read_image_size
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024   # 10 MB
 MAX_PIXELS = 25_000_000               # 25 megapixels (e.g. 5000 x 5000)
 
+logger = logging.getLogger(__name__)
+
 ml_engine = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    Base.metadata.create_all(bind=engine)
+    # Create the table if it's missing. If the database is down right now, don't crash:
+    # the model can still answer /inspect (with partial_success, since nothing is saved).
+    try:
+        Base.metadata.create_all(bind=engine)
+    except SQLAlchemyError as e:
+        logger.warning(
+            "Database unavailable at startup, so tables were not checked or created. "
+            "The API is starting anyway; /inspect will return partial_success until the "
+            "database is reachable again. Error: %s", e
+        )
     ml_engine["model"] = PCBDefectModel()
     yield
     ml_engine.clear()

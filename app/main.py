@@ -3,7 +3,8 @@ load_dotenv()
 
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends, File, UploadFile, Form, HTTPException
+from fastapi import FastAPI, Depends, File, UploadFile, Form, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -68,11 +69,31 @@ def save_inspection(db: Session, record: dict) -> bool:
 def root():
     return {"status": "PCB Defect Auditor is running"}
 
-@app.get("/inspections")
-def list_inspections(db: Session = Depends(get_db)):
-    return db.query(Inspection).all()
+@app.exception_handler(OperationalError)
+async def database_unavailable(request: Request, exc: OperationalError):
+    """Any endpoint that can't reach the database answers 503 (try again later) with a
+    JSON message, instead of a plain-text 500. /inspect handles its own errors and
+    returns partial_success, so it never gets here."""
+    logger.warning("Database unavailable during %s %s: %s", request.method, request.url.path, exc)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "The database is unavailable right now. Please try again shortly."},
+    )
 
-@app.get("/analytics/summary")
+
+DATABASE_DOWN = {503: {"description": "The database is unavailable"}}
+
+
+@app.get("/inspections", responses=DATABASE_DOWN)
+def list_inspections(
+    limit: int = Query(50, ge=1, le=200, description="How many inspections to return (1-200)"),
+    offset: int = Query(0, ge=0, description="How many inspections to skip (for the next page)"),
+    db: Session = Depends(get_db),
+):
+    # Newest first, so the first page shows the most recent inspections
+    return db.query(Inspection).order_by(Inspection.id.desc()).offset(offset).limit(limit).all()
+
+@app.get("/analytics/summary", responses=DATABASE_DOWN)
 def get_analytics_summary(db: Session = Depends(get_db)):
     # 1. Get total inspections
     total = db.query(Inspection).count()

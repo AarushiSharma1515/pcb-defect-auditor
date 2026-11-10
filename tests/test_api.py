@@ -333,3 +333,47 @@ def test_slow_database_does_not_block_other_requests(client):
     assert inspect_still_waiting        # GET / was answered WHILE /inspect was still stuck
     assert seconds < 1.0
     assert results["inspect"].json()["status"] == "success"
+
+
+# ---------------------------------------------------------------- read endpoints
+
+@pytest.mark.parametrize("path", ["/inspections", "/analytics/summary"])
+def test_read_endpoints_return_503_json_when_database_is_down(client, tmp_path, path):
+    DownSession = sessionmaker(bind=unreachable_database(tmp_path))
+    app.dependency_overrides[get_db] = lambda: DownSession()
+    try:
+        response = client.get(path)
+    finally:
+        app.dependency_overrides[get_db] = override_get_db
+
+    assert response.status_code == 503
+    assert response.headers["content-type"] == "application/json"
+    assert "database is unavailable" in response.json()["detail"]
+
+
+def add_rows(board_ids):
+    with TestingSessionLocal() as db:
+        for board_id in board_ids:
+            db.add(Inspection(board_id=board_id, image_path="x.jpg", defect_type="Short",
+                              confidence=0.9, processing_ms=10))
+        db.commit()
+
+
+def test_inspections_are_paged_newest_first(client):
+    add_rows(["page_1", "page_2", "page_3"])     # page_3 is the newest
+
+    first_page = client.get("/inspections?limit=2").json()
+    assert [row["board_id"] for row in first_page] == ["page_3", "page_2"]
+
+    second_row_only = client.get("/inspections?limit=1&offset=1").json()
+    assert [row["board_id"] for row in second_row_only] == ["page_2"]
+
+
+def test_inspections_default_page_size_is_50(client):
+    add_rows([f"bulk_{i}" for i in range(55)])
+    assert len(client.get("/inspections").json()) == 50
+
+
+@pytest.mark.parametrize("query", ["limit=0", "limit=201", "offset=-1"])
+def test_inspections_rejects_out_of_range_paging(client, query):
+    assert client.get(f"/inspections?{query}").status_code == 422

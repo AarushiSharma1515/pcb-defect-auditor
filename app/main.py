@@ -3,7 +3,7 @@ load_dotenv()
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, File, UploadFile, Form, HTTPException
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.db.database import get_db, engine, Base
@@ -20,6 +20,33 @@ async def lifespan(app: FastAPI):
     ml_engine.clear()
 
 app = FastAPI(title="PCB Defect Auditor", lifespan=lifespan)
+
+
+def save_inspection(db: Session, record: dict) -> bool:
+    """Save one inspection row. Returns True if it was saved, False if the database failed.
+
+    If the connection itself fails (OperationalError, e.g. Neon closed an idle
+    connection: "SSL connection has been closed unexpectedly"), try one more time.
+    rollback() hands the broken connection back; SQLAlchemy throws away connections
+    that failed like this, and pool_pre_ping tests the next one, so the second
+    attempt runs on a fresh connection.
+    Other database errors (e.g. a value too long for a column) would just fail the
+    same way again, so they are not retried.
+    """
+    for attempt in (1, 2):
+        try:
+            db.add(Inspection(**record))
+            db.commit()
+            return True
+        except OperationalError as e:
+            db.rollback()
+            print(f"Database connection error (attempt {attempt} of 2): {e}")
+        except SQLAlchemyError as e:
+            db.rollback()
+            print(f"Database error (not retried): {e}")
+            return False
+    return False
+
 
 @app.get("/")
 def root():
@@ -81,20 +108,15 @@ async def inspect_pcb(
 
     # 4. Flag low-confidence predictions
     requires_human_review = bool(confidence_float < 0.50)
-    # 5. Database logging
-    try:
-        new_inspection = Inspection(
-            board_id=board_id,
-            image_path=file.filename,
-            defect_type=defect_type,
-            confidence=confidence_float,
-            processing_ms=processing_ms
-        )
-        db.add(new_inspection)
-        db.commit()
-    except SQLAlchemyError as e:
-        print(f"Database error: {e}")
-        db.rollback()
+    # 5. Database logging (retried once if the connection was dropped)
+    saved = save_inspection(db, {
+        "board_id": board_id,
+        "image_path": file.filename,
+        "defect_type": defect_type,
+        "confidence": confidence_float,
+        "processing_ms": processing_ms,
+    })
+    if not saved:
         return {
             "status": "partial_success",
             "message": "Inference completed but database logging failed.",

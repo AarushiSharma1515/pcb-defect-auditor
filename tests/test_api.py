@@ -1,3 +1,6 @@
+import threading
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -290,3 +293,43 @@ def test_app_starts_and_inspects_when_database_is_down(monkeypatch, tmp_path, ca
     assert response.status_code == 200
     assert response.json()["status"] == "partial_success"       # inference worked, saving didn't
     assert "Database unavailable at startup" in caplog.text
+
+
+# ---------------------------------------------------------------- concurrency
+
+def test_slow_database_does_not_block_other_requests(client):
+    """While one /inspect is stuck waiting on the database, GET / must still answer quickly."""
+    use_fake_model()
+    session = TestingSessionLocal()
+    real_commit = session.commit
+    commit_started = threading.Event()
+    release_commit = threading.Event()
+
+    def hanging_commit():
+        commit_started.set()
+        release_commit.wait(timeout=5)       # a database that hangs, like an unreachable Neon host
+        real_commit()
+
+    session.commit = hanging_commit
+    app.dependency_overrides[get_db] = lambda: session
+    results = {}
+    worker = threading.Thread(target=lambda: results.update(inspect=client.post(
+        "/inspect", data={"board_id": "slow_db"},
+        files={"file": ("board.jpg", make_image(".jpg"), "image/jpeg")})))
+    worker.start()
+    try:
+        assert commit_started.wait(timeout=10)          # /inspect is now stuck in the database
+        start = time.perf_counter()
+        root = client.get("/")
+        seconds = time.perf_counter() - start
+        inspect_still_waiting = worker.is_alive()
+    finally:
+        release_commit.set()
+        worker.join(timeout=20)
+        app.dependency_overrides[get_db] = override_get_db
+        session.close()
+
+    assert root.status_code == 200
+    assert inspect_still_waiting        # GET / was answered WHILE /inspect was still stuck
+    assert seconds < 1.0
+    assert results["inspect"].json()["status"] == "success"

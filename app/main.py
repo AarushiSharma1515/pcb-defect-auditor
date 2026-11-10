@@ -96,14 +96,17 @@ def get_analytics_summary(db: Session = Depends(get_db)):
     400: {"description": "Empty file, not a JPEG/PNG, or a corrupted image"},
     413: {"description": "File over 10 MB or image over 25 megapixels"},
 })
-async def inspect_pcb(
+def inspect_pcb(
+    # Plain "def" (not "async def") on purpose: everything in here blocks (the ONNX model,
+    # the database commit). FastAPI runs plain-def endpoints in a thread pool, so a slow
+    # request can't freeze the event loop that answers every other request.
     board_id: str = Form(...),
     file: UploadFile = File(...),
     db: Session = Depends(get_db)
 ):
     # 1. Read raw bytes, but never more than the limit (+1 byte, so we can tell it was too big).
     #    An empty file would crash OpenCV, so reject it here.
-    file_bytes = await file.read(MAX_UPLOAD_BYTES + 1)
+    file_bytes = file.file.read(MAX_UPLOAD_BYTES + 1)   # file.file = the uploaded data (no await needed)
     if len(file_bytes) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="The file is larger than the 10 MB limit.")
     if not file_bytes:

@@ -121,7 +121,9 @@ def inspect_pcb(
     # Plain "def" (not "async def") on purpose: everything in here blocks (the ONNX model,
     # the database commit). FastAPI runs plain-def endpoints in a thread pool, so a slow
     # request can't freeze the event loop that answers every other request.
-    board_id: str = Form(...),
+    # Same limit as the database column (String(100)). Checking it here gives the same
+    # 422 error on SQLite and Postgres, before any work is done.
+    board_id: str = Form(..., max_length=100),
     file: UploadFile = File(...),
     db: Session = Depends(get_db)
 ):

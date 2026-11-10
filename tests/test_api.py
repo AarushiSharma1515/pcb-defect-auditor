@@ -377,3 +377,27 @@ def test_inspections_default_page_size_is_50(client):
 @pytest.mark.parametrize("query", ["limit=0", "limit=201", "offset=-1"])
 def test_inspections_rejects_out_of_range_paging(client, query):
     assert client.get(f"/inspections?{query}").status_code == 422
+
+
+# ---------------------------------------------------------------- board_id
+
+def test_board_id_over_100_characters_is_rejected(client):
+    use_fake_model()
+    from app.main import ml_engine
+    too_long = "B" * 101
+    response = client.post("/inspect", data={"board_id": too_long},
+                           files={"file": ("board.jpg", make_image(".jpg"), "image/jpeg")})
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["body", "board_id"]
+    ml_engine["model"].predict.assert_not_called()   # rejected before the model ran
+    assert count_rows(too_long) == 0                 # SQLite would have stored it
+
+
+def test_board_id_of_exactly_100_characters_is_accepted(client):
+    use_fake_model()
+    board_id = "B" * 100
+    response = client.post("/inspect", data={"board_id": board_id},
+                           files={"file": ("board.jpg", make_image(".jpg"), "image/jpeg")})
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+    assert count_rows(board_id) == 1

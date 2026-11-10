@@ -1,0 +1,8 @@
+.env
+.venv
+.git
+__pycache__
+.pytest_cache
+*.sqlite
+models/best.pt
+!models/pcb_defect_v1.onnx

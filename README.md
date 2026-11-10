@@ -42,7 +42,7 @@ Neon Postgres — inspections table
 
 **GUI-less containerization.** The deployment strips OS-level display dependencies (e.g. `libgl1`) by using `opencv-python-headless` instead of full OpenCV. Smaller image, faster builds, no display-server dependencies a backend service never needed in the first place.
 
-**Simulation mode for local development without model weights.** `PCBDefectModel` checks whether the ONNX file exists at startup; if it's missing, it falls back to a randomized simulation path instead of crashing, so the API's request/response contract can still be tested. *Note: since `models/pcb_defect_v1.onnx` is committed to this repo (kept intentionally small at 11.7MB), CI and this deployment both run against the real model, not the simulation fallback — the fallback exists for local development on a fresh clone before the file is present, not for hiding weights from CI.*
+**No silent fallback when the model is missing.** `PCBDefectModel` resolves `models/pcb_defect_v1.onnx` from its own file location (so the app works from any working directory) and refuses to start with a clear `FileNotFoundError` if the file is missing, rather than serving made-up predictions. The model is committed to this repo (11.7MB), so CI and the deployment always run the real model.
 
 **Graceful degradation on database failure.** Inference and persistence are decoupled — if the Neon write fails (observed in practice during a free-tier cold start), the API still returns the real inference result to the caller with a `partial_success` status, instead of losing a successful prediction because of an unrelated storage hiccup.
 

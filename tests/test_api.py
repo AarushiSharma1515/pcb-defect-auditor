@@ -166,3 +166,30 @@ def test_non_connection_db_error_is_not_retried(client):
 
     assert response.json()["status"] == "partial_success"
     assert commits == 1                    # retrying would fail the same way, so we don't
+
+
+# ---------------------------------------------------------------- bad uploads
+
+def post_without_content_type(client, content: bytes):
+    """POST /inspect where the file part has no Content-Type header at all.
+    (Test clients always add one, so the multipart body is built by hand.)"""
+    boundary = "TESTBOUNDARY"
+    body = (
+        f'--{boundary}\r\nContent-Disposition: form-data; name="board_id"\r\n\r\nno_ctype\r\n'
+        f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="board.jpg"\r\n\r\n'
+    ).encode() + content + f"\r\n--{boundary}--\r\n".encode()
+    return client.post("/inspect", content=body,
+                       headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+
+
+def test_empty_file_is_a_clean_400(client):
+    response = client.post("/inspect", data={"board_id": "empty"},
+                           files={"file": ("empty.jpg", b"", "image/jpeg")})
+    assert response.status_code == 400
+    assert "empty" in response.json()["detail"]
+
+
+def test_missing_content_type_is_a_clean_400(client):
+    response = post_without_content_type(client, b"not an image")
+    assert response.status_code == 400
+    assert "detail" in response.json()

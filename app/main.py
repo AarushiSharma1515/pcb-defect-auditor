@@ -84,15 +84,17 @@ async def inspect_pcb(
     file: UploadFile = File(...),
     db: Session = Depends(get_db)
 ):
-    # 1. Validate file type
-    if not file.content_type.startswith("image/"):
+    # 1. Validate file type (content_type is None if the client sent no Content-Type for the file)
+    if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(
-            status_code=400, 
-            detail=f"Invalid file type: {file.content_type}. Please upload a JPEG or PNG."
+            status_code=400,
+            detail=f"Invalid file type: {file.content_type or 'none given'}. Please upload a JPEG or PNG."
         )
 
-    # 2. Read raw bytes
+    # 2. Read raw bytes. An empty file would crash OpenCV, so reject it here.
     file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="The uploaded file is empty (0 bytes).")
 
     # 3. Run ONNX Inference and extract dictionary values safely
     try:

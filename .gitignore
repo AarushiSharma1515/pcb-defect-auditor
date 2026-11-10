@@ -14,3 +14,4 @@ Thumbs.db
 models/*.pt
 models/*.onnx
 !models/pcb_defect_v1.onnx
+data/

@@ -6,6 +6,9 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import IntegrityError, OperationalError
 from unittest.mock import MagicMock
 
+import cv2
+import numpy as np
+
 from app.main import app
 from app.db.database import Base, get_db
 from app.db.models import Inspection
@@ -25,6 +28,11 @@ def override_get_db():
 
 # Force FastAPI to use the temporary database instead of Neon
 app.dependency_overrides[get_db] = override_get_db
+
+
+def make_image(extension: str = ".jpg") -> bytes:
+    """A tiny real image (64x64 gray square), encoded as ".jpg" or ".png"."""
+    return cv2.imencode(extension, np.full((64, 64, 3), 128, np.uint8))[1].tobytes()
 
 
 @pytest.fixture
@@ -74,7 +82,7 @@ def test_inspect_valid_image(client):
     from app.main import ml_engine
     ml_engine["model"] = fake_model
     
-    files = {"file": ("valid.jpg", b"fake valid image bytes", "image/jpeg")}
+    files = {"file": ("valid.jpg", make_image(".jpg"), "image/jpeg")}
     data = {"board_id": "test_board_003"}
     
     response = client.post("/inspect", data=data, files=files)
@@ -123,7 +131,7 @@ def post_with_failing_commits(client, board_id, errors):
         response = client.post(
             "/inspect",
             data={"board_id": board_id},
-            files={"file": ("board.jpg", b"fake image bytes", "image/jpeg")},
+            files={"file": ("board.jpg", make_image(".jpg"), "image/jpeg")},
         )
     finally:
         app.dependency_overrides[get_db] = override_get_db
@@ -193,3 +201,31 @@ def test_missing_content_type_is_a_clean_400(client):
     response = post_without_content_type(client, b"not an image")
     assert response.status_code == 400
     assert "detail" in response.json()
+
+
+def test_real_png_sent_as_octet_stream_is_accepted(client):
+    # The real model runs here: the bytes are decoded and inferred, whatever the label says
+    response = client.post("/inspect", data={"board_id": "octet"},
+                           files={"file": ("board.png", make_image(".png"), "application/octet-stream")})
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+
+
+def test_real_jpeg_without_content_type_is_accepted(client):
+    response = post_without_content_type(client, make_image(".jpg"))
+    assert response.status_code == 200
+
+
+def test_non_image_message_says_the_content_is_wrong(client):
+    response = client.post("/inspect", data={"board_id": "pdf"},
+                           files={"file": ("fake.png", b"%PDF-1.4 not an image", "image/png")})
+    assert response.status_code == 400
+    assert "not a JPEG or PNG" in response.json()["detail"]
+
+
+def test_truncated_jpeg_message_says_it_is_corrupted(client):
+    truncated = make_image(".jpg")[:40]  # starts like a JPEG, but most of the file is missing
+    response = client.post("/inspect", data={"board_id": "truncated"},
+                           files={"file": ("cut.jpg", truncated, "image/jpeg")})
+    assert response.status_code == 400
+    assert "could not be decoded" in response.json()["detail"]

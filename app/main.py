@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.db.database import get_db, engine, Base
 from app.db.models import Inspection
 from app.ml.inference import PCBDefectModel
+from app.ml.image_checks import detect_image_format
 
 ml_engine = {}
 
@@ -77,24 +78,27 @@ def get_analytics_summary(db: Session = Depends(get_db)):
     }
 
 @app.post("/inspect", responses={
-    400: {"description": "Invalid file type or corrupted image"}
+    400: {"description": "Empty file, not a JPEG/PNG, or a corrupted image"}
 })
 async def inspect_pcb(
     board_id: str = Form(...),
     file: UploadFile = File(...),
     db: Session = Depends(get_db)
 ):
-    # 1. Validate file type (content_type is None if the client sent no Content-Type for the file)
-    if not file.content_type or not file.content_type.startswith("image/"):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid file type: {file.content_type or 'none given'}. Please upload a JPEG or PNG."
-        )
-
-    # 2. Read raw bytes. An empty file would crash OpenCV, so reject it here.
+    # 1. Read raw bytes. An empty file would crash OpenCV, so reject it here.
     file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(status_code=400, detail="The uploaded file is empty (0 bytes).")
+
+    # 2. Decide if it's an image by looking at the bytes, not at the Content-Type label
+    #    (clients often send real images as application/octet-stream, or with no label).
+    image_format = detect_image_format(file_bytes)
+    if image_format is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"The file's content is not a JPEG or PNG image "
+                    f"(it was sent as '{file.content_type or 'no content type'}'). Please upload a JPEG or PNG."),
+        )
 
     # 3. Run ONNX Inference and extract dictionary values safely
     try:
@@ -102,8 +106,12 @@ async def inspect_pcb(
         defect_type = prediction_result["defect_type"]
         confidence_float = float(prediction_result["confidence"])
         processing_ms = int(prediction_result["processing_ms"])
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except ValueError:
+        # predict() raises ValueError when OpenCV can't decode the image
+        raise HTTPException(
+            status_code=400,
+            detail=f"The file looks like a {image_format} but could not be decoded; it is probably truncated or corrupted.",
+        )
     except TypeError as e:
         # Fallback just in case predict() returns a tuple instead of a dictionary
         raise HTTPException(status_code=500, detail="Model returned an unexpected data format.")

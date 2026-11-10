@@ -283,9 +283,7 @@ def main():
     parser.add_argument("--dataset-name", default="unspecified", help="Dataset name shown in the report")
     args = parser.parse_args()
 
-    model = PCBDefectModel(model_path=str(MODEL_PATH))
-    if not model.use_real_model:
-        sys.exit(f"Model not found at {MODEL_PATH}; refusing to evaluate simulation mode.")
+    model = PCBDefectModel(model_path=str(MODEL_PATH))  # raises FileNotFoundError if it's missing
 
     lines = [
         "# Model evaluation",

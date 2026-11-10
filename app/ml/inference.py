@@ -1,26 +1,31 @@
-import os
 import time
-import random
+from pathlib import Path
+
 import cv2
 import numpy as np
 import onnxruntime as ort
 
+# Find the model relative to THIS file (app/ml/inference.py -> up 2 folders = repo root),
+# not relative to the folder the app was started from, so it works from any directory.
+DEFAULT_MODEL_PATH = Path(__file__).resolve().parents[2] / "models" / "pcb_defect_v1.onnx"
+
 
 class PCBDefectModel:
-    def __init__(self, model_path: str = "models/pcb_defect_v1.onnx"):
-        self.model_path = model_path
+    def __init__(self, model_path=DEFAULT_MODEL_PATH):
+        self.model_path = Path(model_path)
 
         # Must exactly match the class order used in data.yaml during training
         self.defect_classes = ["Open", "Short", "Mousebite", "Spur", "Copper", "Pin-hole"]
 
-        # Check if the real model exists yet
-        self.use_real_model = os.path.exists(model_path)
-        if self.use_real_model:
-            print(f"Initializing ONNX Runtime with {model_path}...")
-            self.session = ort.InferenceSession(self.model_path)
-            self.input_name = self.session.get_inputs()[0].name
-        else:
-            print(f"Warning: {model_path} not found. Running in simulation mode.")
+        # No model, no service: stop with a clear error instead of returning made-up predictions
+        if not self.model_path.is_file():
+            raise FileNotFoundError(
+                f"ONNX model not found at {self.model_path}. The API cannot run without it; "
+                f"make sure models/pcb_defect_v1.onnx is in the repo and in the Docker image."
+            )
+        print(f"Initializing ONNX Runtime with {self.model_path}...")
+        self.session = ort.InferenceSession(str(self.model_path))
+        self.input_name = self.session.get_inputs()[0].name
 
     def preprocess(self, image_bytes: bytes) -> np.ndarray:
         # 1. Decode raw bytes into a BGR image array directly in memory
@@ -92,25 +97,13 @@ class PCBDefectModel:
 
     def predict(self, image_bytes: bytes) -> dict:
         start_time = time.perf_counter()
-        nparr = np.frombuffer(image_bytes, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if img is None:
-            raise ValueError("Could not decode image — file may be corrupted or not a valid image")
+        input_tensor = self.preprocess(image_bytes)   # raises ValueError if the image can't be decoded
+        outputs = self.session.run(None, {self.input_name: input_tensor})
+        predicted_defect, confidence = self.postprocess(outputs)
 
-        if self.use_real_model:
-            # Real ONNX Execution Pipeline
-            input_tensor = self.preprocess(image_bytes)
-            outputs = self.session.run(None, {self.input_name: input_tensor})
-            predicted_defect, confidence = self.postprocess(outputs)
-
-            if predicted_defect is None:
-                predicted_defect = "no_defect_detected"
-                confidence = 0.0
-        else:
-            # Simulation Pipeline (Fallback — used only if weights file is missing)
-            time.sleep(random.uniform(0.01, 0.04))
-            predicted_defect = random.choices(self.defect_classes, weights=[1] * len(self.defect_classes))[0]
-            confidence = round(random.uniform(0.85, 0.99), 4)
+        if predicted_defect is None:
+            predicted_defect = "no_defect_detected"
+            confidence = 0.0
         end_time = time.perf_counter()
 
         return {

@@ -74,10 +74,8 @@ def main():
     # Read all files into memory first so disk speed is not part of the timing
     images = [p.read_bytes() for p in paths]
 
-    # 2. Load the model exactly like the API does. Refuse to benchmark simulation mode.
+    # 2. Load the model exactly like the API does (raises FileNotFoundError if it's missing).
     model = PCBDefectModel(model_path=str(MODEL_PATH))
-    if not model.use_real_model:
-        sys.exit(f"Model not found at {MODEL_PATH}; refusing to benchmark simulation mode.")
     providers = model.session.get_providers()
 
     # 3. Warm-up: the first runs are slower (memory allocation, caches), so don't time them

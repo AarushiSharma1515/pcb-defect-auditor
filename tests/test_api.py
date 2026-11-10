@@ -1,3 +1,6 @@
+import threading
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -5,6 +8,9 @@ from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import IntegrityError, OperationalError
 from unittest.mock import MagicMock
+
+import cv2
+import numpy as np
 
 from app.main import app
 from app.db.database import Base, get_db
@@ -25,6 +31,11 @@ def override_get_db():
 
 # Force FastAPI to use the temporary database instead of Neon
 app.dependency_overrides[get_db] = override_get_db
+
+
+def make_image(extension: str = ".jpg") -> bytes:
+    """A tiny real image (64x64 gray square), encoded as ".jpg" or ".png"."""
+    return cv2.imencode(extension, np.full((64, 64, 3), 128, np.uint8))[1].tobytes()
 
 
 @pytest.fixture
@@ -74,7 +85,7 @@ def test_inspect_valid_image(client):
     from app.main import ml_engine
     ml_engine["model"] = fake_model
     
-    files = {"file": ("valid.jpg", b"fake valid image bytes", "image/jpeg")}
+    files = {"file": ("valid.jpg", make_image(".jpg"), "image/jpeg")}
     data = {"board_id": "test_board_003"}
     
     response = client.post("/inspect", data=data, files=files)
@@ -123,7 +134,7 @@ def post_with_failing_commits(client, board_id, errors):
         response = client.post(
             "/inspect",
             data={"board_id": board_id},
-            files={"file": ("board.jpg", b"fake image bytes", "image/jpeg")},
+            files={"file": ("board.jpg", make_image(".jpg"), "image/jpeg")},
         )
     finally:
         app.dependency_overrides[get_db] = override_get_db
@@ -166,3 +177,227 @@ def test_non_connection_db_error_is_not_retried(client):
 
     assert response.json()["status"] == "partial_success"
     assert commits == 1                    # retrying would fail the same way, so we don't
+
+
+# ---------------------------------------------------------------- bad uploads
+
+def post_without_content_type(client, content: bytes):
+    """POST /inspect where the file part has no Content-Type header at all.
+    (Test clients always add one, so the multipart body is built by hand.)"""
+    boundary = "TESTBOUNDARY"
+    body = (
+        f'--{boundary}\r\nContent-Disposition: form-data; name="board_id"\r\n\r\nno_ctype\r\n'
+        f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="board.jpg"\r\n\r\n'
+    ).encode() + content + f"\r\n--{boundary}--\r\n".encode()
+    return client.post("/inspect", content=body,
+                       headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+
+
+def test_empty_file_is_a_clean_400(client):
+    response = client.post("/inspect", data={"board_id": "empty"},
+                           files={"file": ("empty.jpg", b"", "image/jpeg")})
+    assert response.status_code == 400
+    assert "empty" in response.json()["detail"]
+
+
+def test_missing_content_type_is_a_clean_400(client):
+    response = post_without_content_type(client, b"not an image")
+    assert response.status_code == 400
+    assert "detail" in response.json()
+
+
+def test_real_png_sent_as_octet_stream_is_accepted(client):
+    # The real model runs here: the bytes are decoded and inferred, whatever the label says
+    response = client.post("/inspect", data={"board_id": "octet"},
+                           files={"file": ("board.png", make_image(".png"), "application/octet-stream")})
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+
+
+def test_real_jpeg_without_content_type_is_accepted(client):
+    response = post_without_content_type(client, make_image(".jpg"))
+    assert response.status_code == 200
+
+
+def test_non_image_message_says_the_content_is_wrong(client):
+    response = client.post("/inspect", data={"board_id": "pdf"},
+                           files={"file": ("fake.png", b"%PDF-1.4 not an image", "image/png")})
+    assert response.status_code == 400
+    assert "not a JPEG or PNG" in response.json()["detail"]
+
+
+def test_truncated_jpeg_message_says_it_is_corrupted(client):
+    truncated = make_image(".jpg")[:40]  # starts like a JPEG, but most of the file is missing
+    response = client.post("/inspect", data={"board_id": "truncated"},
+                           files={"file": ("cut.jpg", truncated, "image/jpeg")})
+    assert response.status_code == 400
+    assert "truncated or corrupted" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------- size limits
+
+def png_header_only(width: int, height: int) -> bytes:
+    """The first bytes of a PNG that CLAIMS to be width x height, with no pixel data at all.
+    Enough for the header check; it would fail if anyone tried to decode it."""
+    ihdr = width.to_bytes(4, "big") + height.to_bytes(4, "big") + bytes([8, 2, 0, 0, 0])
+    return b"\x89PNG\r\n\x1a\n" + (13).to_bytes(4, "big") + b"IHDR" + ihdr + b"\x00" * 4
+
+
+def test_file_over_10_mb_is_rejected_with_413(client):
+    too_big = make_image(".jpg") + b"\x00" * (10 * 1024 * 1024)
+    response = client.post("/inspect", data={"board_id": "big_file"},
+                           files={"file": ("big.jpg", too_big, "image/jpeg")})
+    assert response.status_code == 413
+    assert "10 MB" in response.json()["detail"]
+
+
+def test_too_many_pixels_is_rejected_before_decoding(client):
+    use_fake_model()
+    from app.main import ml_engine
+    response = client.post("/inspect", data={"board_id": "pixel_bomb"},
+                           files={"file": ("huge.png", png_header_only(12000, 12000), "image/png")})
+    assert response.status_code == 413
+    assert "12000x12000" in response.json()["detail"]
+    ml_engine["model"].predict.assert_not_called()   # rejected from the header alone
+
+
+def test_exactly_25_megapixels_passes_the_pixel_check(client):
+    # 5000 x 5000 = 25,000,000 is allowed; this fake file then fails to decode (400, not 413)
+    response = client.post("/inspect", data={"board_id": "limit"},
+                           files={"file": ("limit.png", png_header_only(5000, 5000), "image/png")})
+    assert response.status_code == 400
+
+
+# ---------------------------------------------------------------- database down
+
+def unreachable_database(tmp_path):
+    """A real engine whose database can't be opened: a SQLite file inside a folder that
+    doesn't exist. Every connection attempt raises OperationalError, like a down Neon."""
+    return create_engine("sqlite:///" + (tmp_path / "missing_folder" / "x.db").as_posix())
+
+
+def test_app_starts_and_inspects_when_database_is_down(monkeypatch, tmp_path, caplog):
+    import app.main as main_module
+    down = unreachable_database(tmp_path)
+    monkeypatch.setattr(main_module, "engine", down)             # what create_all() uses at startup
+    DownSession = sessionmaker(bind=down)
+    app.dependency_overrides[get_db] = lambda: DownSession()    # what /inspect uses
+    try:
+        with TestClient(app) as down_client:                     # startup must not raise
+            assert down_client.get("/").status_code == 200
+            response = down_client.post("/inspect", data={"board_id": "db_down"},
+                                        files={"file": ("board.jpg", make_image(".jpg"), "image/jpeg")})
+    finally:
+        app.dependency_overrides[get_db] = override_get_db
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "partial_success"       # inference worked, saving didn't
+    assert "Database unavailable at startup" in caplog.text
+
+
+# ---------------------------------------------------------------- concurrency
+
+def test_slow_database_does_not_block_other_requests(client):
+    """While one /inspect is stuck waiting on the database, GET / must still answer quickly."""
+    use_fake_model()
+    session = TestingSessionLocal()
+    real_commit = session.commit
+    commit_started = threading.Event()
+    release_commit = threading.Event()
+
+    def hanging_commit():
+        commit_started.set()
+        release_commit.wait(timeout=5)       # a database that hangs, like an unreachable Neon host
+        real_commit()
+
+    session.commit = hanging_commit
+    app.dependency_overrides[get_db] = lambda: session
+    results = {}
+    worker = threading.Thread(target=lambda: results.update(inspect=client.post(
+        "/inspect", data={"board_id": "slow_db"},
+        files={"file": ("board.jpg", make_image(".jpg"), "image/jpeg")})))
+    worker.start()
+    try:
+        assert commit_started.wait(timeout=10)          # /inspect is now stuck in the database
+        start = time.perf_counter()
+        root = client.get("/")
+        seconds = time.perf_counter() - start
+        inspect_still_waiting = worker.is_alive()
+    finally:
+        release_commit.set()
+        worker.join(timeout=20)
+        app.dependency_overrides[get_db] = override_get_db
+        session.close()
+
+    assert root.status_code == 200
+    assert inspect_still_waiting        # GET / was answered WHILE /inspect was still stuck
+    assert seconds < 1.0
+    assert results["inspect"].json()["status"] == "success"
+
+
+# ---------------------------------------------------------------- read endpoints
+
+@pytest.mark.parametrize("path", ["/inspections", "/analytics/summary"])
+def test_read_endpoints_return_503_json_when_database_is_down(client, tmp_path, path):
+    DownSession = sessionmaker(bind=unreachable_database(tmp_path))
+    app.dependency_overrides[get_db] = lambda: DownSession()
+    try:
+        response = client.get(path)
+    finally:
+        app.dependency_overrides[get_db] = override_get_db
+
+    assert response.status_code == 503
+    assert response.headers["content-type"] == "application/json"
+    assert "database is unavailable" in response.json()["detail"]
+
+
+def add_rows(board_ids):
+    with TestingSessionLocal() as db:
+        for board_id in board_ids:
+            db.add(Inspection(board_id=board_id, image_path="x.jpg", defect_type="Short",
+                              confidence=0.9, processing_ms=10))
+        db.commit()
+
+
+def test_inspections_are_paged_newest_first(client):
+    add_rows(["page_1", "page_2", "page_3"])     # page_3 is the newest
+
+    first_page = client.get("/inspections?limit=2").json()
+    assert [row["board_id"] for row in first_page] == ["page_3", "page_2"]
+
+    second_row_only = client.get("/inspections?limit=1&offset=1").json()
+    assert [row["board_id"] for row in second_row_only] == ["page_2"]
+
+
+def test_inspections_default_page_size_is_50(client):
+    add_rows([f"bulk_{i}" for i in range(55)])
+    assert len(client.get("/inspections").json()) == 50
+
+
+@pytest.mark.parametrize("query", ["limit=0", "limit=201", "offset=-1"])
+def test_inspections_rejects_out_of_range_paging(client, query):
+    assert client.get(f"/inspections?{query}").status_code == 422
+
+
+# ---------------------------------------------------------------- board_id
+
+def test_board_id_over_100_characters_is_rejected(client):
+    use_fake_model()
+    from app.main import ml_engine
+    too_long = "B" * 101
+    response = client.post("/inspect", data={"board_id": too_long},
+                           files={"file": ("board.jpg", make_image(".jpg"), "image/jpeg")})
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["body", "board_id"]
+    ml_engine["model"].predict.assert_not_called()   # rejected before the model ran
+    assert count_rows(too_long) == 0                 # SQLite would have stored it
+
+
+def test_board_id_of_exactly_100_characters_is_accepted(client):
+    use_fake_model()
+    board_id = "B" * 100
+    response = client.post("/inspect", data={"board_id": board_id},
+                           files={"file": ("board.jpg", make_image(".jpg"), "image/jpeg")})
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+    assert count_rows(board_id) == 1

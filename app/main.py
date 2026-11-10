@@ -1,20 +1,37 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends, File, UploadFile, Form, HTTPException
+from fastapi import FastAPI, Depends, File, UploadFile, Form, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.db.database import get_db, engine, Base
 from app.db.models import Inspection
 from app.ml.inference import PCBDefectModel
+from app.ml.image_checks import detect_image_format, read_image_size
+
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024   # 10 MB
+MAX_PIXELS = 25_000_000               # 25 megapixels (e.g. 5000 x 5000)
+
+logger = logging.getLogger(__name__)
 
 ml_engine = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    Base.metadata.create_all(bind=engine)
+    # Create the table if it's missing. If the database is down right now, don't crash:
+    # the model can still answer /inspect (with partial_success, since nothing is saved).
+    try:
+        Base.metadata.create_all(bind=engine)
+    except SQLAlchemyError as e:
+        logger.warning(
+            "Database unavailable at startup, so tables were not checked or created. "
+            "The API is starting anyway; /inspect will return partial_success until the "
+            "database is reachable again. Error: %s", e
+        )
     ml_engine["model"] = PCBDefectModel()
     yield
     ml_engine.clear()
@@ -52,11 +69,31 @@ def save_inspection(db: Session, record: dict) -> bool:
 def root():
     return {"status": "PCB Defect Auditor is running"}
 
-@app.get("/inspections")
-def list_inspections(db: Session = Depends(get_db)):
-    return db.query(Inspection).all()
+@app.exception_handler(OperationalError)
+async def database_unavailable(request: Request, exc: OperationalError):
+    """Any endpoint that can't reach the database answers 503 (try again later) with a
+    JSON message, instead of a plain-text 500. /inspect handles its own errors and
+    returns partial_success, so it never gets here."""
+    logger.warning("Database unavailable during %s %s: %s", request.method, request.url.path, exc)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "The database is unavailable right now. Please try again shortly."},
+    )
 
-@app.get("/analytics/summary")
+
+DATABASE_DOWN = {503: {"description": "The database is unavailable"}}
+
+
+@app.get("/inspections", responses=DATABASE_DOWN)
+def list_inspections(
+    limit: int = Query(50, ge=1, le=200, description="How many inspections to return (1-200)"),
+    offset: int = Query(0, ge=0, description="How many inspections to skip (for the next page)"),
+    db: Session = Depends(get_db),
+):
+    # Newest first, so the first page shows the most recent inspections
+    return db.query(Inspection).order_by(Inspection.id.desc()).offset(offset).limit(limit).all()
+
+@app.get("/analytics/summary", responses=DATABASE_DOWN)
 def get_analytics_summary(db: Session = Depends(get_db)):
     # 1. Get total inspections
     total = db.query(Inspection).count()
@@ -77,22 +114,51 @@ def get_analytics_summary(db: Session = Depends(get_db)):
     }
 
 @app.post("/inspect", responses={
-    400: {"description": "Invalid file type or corrupted image"}
+    400: {"description": "Empty file, not a JPEG/PNG, or a corrupted image"},
+    413: {"description": "File over 10 MB or image over 25 megapixels"},
 })
-async def inspect_pcb(
-    board_id: str = Form(...),
+def inspect_pcb(
+    # Plain "def" (not "async def") on purpose: everything in here blocks (the ONNX model,
+    # the database commit). FastAPI runs plain-def endpoints in a thread pool, so a slow
+    # request can't freeze the event loop that answers every other request.
+    # Same limit as the database column (String(100)). Checking it here gives the same
+    # 422 error on SQLite and Postgres, before any work is done.
+    board_id: str = Form(..., max_length=100),
     file: UploadFile = File(...),
     db: Session = Depends(get_db)
 ):
-    # 1. Validate file type
-    if not file.content_type.startswith("image/"):
+    # 1. Read raw bytes, but never more than the limit (+1 byte, so we can tell it was too big).
+    #    An empty file would crash OpenCV, so reject it here.
+    file_bytes = file.file.read(MAX_UPLOAD_BYTES + 1)   # file.file = the uploaded data (no await needed)
+    if len(file_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="The file is larger than the 10 MB limit.")
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="The uploaded file is empty (0 bytes).")
+
+    # 2. Decide if it's an image by looking at the bytes, not at the Content-Type label
+    #    (clients often send real images as application/octet-stream, or with no label).
+    image_format = detect_image_format(file_bytes)
+    if image_format is None:
         raise HTTPException(
-            status_code=400, 
-            detail=f"Invalid file type: {file.content_type}. Please upload a JPEG or PNG."
+            status_code=400,
+            detail=(f"The file's content is not a JPEG or PNG image "
+                    f"(it was sent as '{file.content_type or 'no content type'}'). Please upload a JPEG or PNG."),
         )
 
-    # 2. Read raw bytes
-    file_bytes = await file.read()
+    # 2b. Check width x height from the file header BEFORE decoding: a small file can
+    #     unpack into a huge image (a 0.5 MB PNG can need 432 MB once decoded).
+    size = read_image_size(file_bytes, image_format)
+    if size is None or 0 in size:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The file looks like a {image_format} but its header could not be read; it is probably truncated or corrupted.",
+        )
+    width, height = size
+    if width * height > MAX_PIXELS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"The image is {width}x{height} pixels; the limit is {MAX_PIXELS // 1_000_000} megapixels.",
+        )
 
     # 3. Run ONNX Inference and extract dictionary values safely
     try:
@@ -100,8 +166,12 @@ async def inspect_pcb(
         defect_type = prediction_result["defect_type"]
         confidence_float = float(prediction_result["confidence"])
         processing_ms = int(prediction_result["processing_ms"])
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except ValueError:
+        # predict() raises ValueError when OpenCV can't decode the image
+        raise HTTPException(
+            status_code=400,
+            detail=f"The file looks like a {image_format} but could not be decoded; it is probably truncated or corrupted.",
+        )
     except TypeError as e:
         # Fallback just in case predict() returns a tuple instead of a dictionary
         raise HTTPException(status_code=500, detail="Model returned an unexpected data format.")

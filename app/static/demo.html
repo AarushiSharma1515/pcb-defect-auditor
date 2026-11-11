@@ -62,6 +62,45 @@
     padding: 16px;
     margin: 16px 0;
   }
+  /* Server status banner */
+  .status {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px 14px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--card);
+    margin: 16px 0;
+  }
+  .status p { margin: 0; }
+  .status .detail { color: var(--muted); font-size: 0.9rem; }
+  .status.ready { border-color: var(--ok); }
+  .status.ready .headline { color: var(--ok); font-weight: 600; }
+  .status.failed { background: var(--error-bg); color: var(--error-text); border-color: transparent; }
+  .status.failed .detail { color: inherit; }
+  .spinner {
+    flex: none;
+    width: 18px; height: 18px; margin-top: 3px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } }
+  button {
+    font: inherit;
+    cursor: pointer;
+    border-radius: 8px;
+    border: 1px solid var(--accent);
+    background: var(--accent);
+    color: #fff;
+    padding: 6px 14px;
+    margin-top: 8px;
+  }
+  [hidden] { display: none !important; }
+
   footer {
     color: var(--muted);
     font-size: 0.875rem;
@@ -85,9 +124,114 @@
     </ul>
   </header>
 
+  <section id="server-status" class="status" role="status" aria-live="polite">
+    <div class="spinner" id="status-spinner" aria-hidden="true"></div>
+    <div>
+      <p class="headline" id="status-headline">Waking up the server (free hosting sleeps when idle). This can take up to 60 seconds.</p>
+      <p class="detail" id="status-detail"></p>
+      <button type="button" id="status-retry" hidden>Try again</button>
+    </div>
+  </section>
+
   <footer>
     Trained on DeepPCB (Kaggle repackaging, 1,200/150/150 split). Not validated on real factory images.
   </footer>
 </main>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------- settings
+const HEALTH_TIMEOUT_MS = 60000;      // free hosting can take up to a minute to wake up
+const HEALTH_RETRY_DELAY_MS = 2000;   // wait between attempts while it is waking
+const WAKING_MESSAGE =
+  "Waking up the server (free hosting sleeps when idle). This can take up to 60 seconds.";
+
+// ---------------------------------------------------------------- pure helpers
+// (No page access in here, so tests can run them in Node.)
+
+/** Turn a /health reply into the banner text: {headline, detail}. */
+function describeHealth(health) {
+  const notes = [];
+  if (!health || health.model_loaded !== true) {
+    notes.push("The model is not loaded on the server, so inspections will fail.");
+  }
+  if (health && health.database !== "ok") {
+    notes.push("The database is unreachable: results will be shown but not saved.");
+  }
+  const version = health && health.version ? "Server version " + health.version + "." : "";
+  return { headline: "Ready", detail: [version].concat(notes).filter(Boolean).join(" ") };
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Ask /health until it answers 200 or the time budget runs out.
+ * A sleeping free host may refuse connections or answer 502/503 while it starts,
+ * so failures are retried; each attempt is cut off when the budget runs out.
+ * Resolves with the parsed /health JSON, or null if it never answered.
+ */
+async function waitForHealth(fetchFn, timeoutMs, retryDelayMs = HEALTH_RETRY_DELAY_MS) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), deadline - Date.now());
+    try {
+      const response = await fetchFn("/health", { signal: controller.signal, cache: "no-store" });
+      if (response.ok) return await response.json();
+    } catch (error) {
+      // network error or timeout: fall through and retry while time is left
+    } finally {
+      clearTimeout(timer);
+    }
+    await sleep(Math.min(retryDelayMs, Math.max(0, deadline - Date.now())));
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------- page
+function startPage() {
+  const $ = (id) => document.getElementById(id);
+  const status = {
+    box: $("server-status"), spinner: $("status-spinner"),
+    headline: $("status-headline"), detail: $("status-detail"), retry: $("status-retry"),
+  };
+
+  async function checkServer() {
+    status.box.className = "status";
+    status.spinner.hidden = false;
+    status.retry.hidden = true;
+    status.headline.textContent = WAKING_MESSAGE;
+    const started = Date.now();
+    const ticker = setInterval(() => {
+      status.detail.textContent = "Waiting… " + Math.round((Date.now() - started) / 1000) + " s";
+    }, 1000);
+    status.detail.textContent = "";
+
+    const health = await waitForHealth(window.fetch.bind(window), HEALTH_TIMEOUT_MS);
+    clearInterval(ticker);
+    status.spinner.hidden = true;
+
+    if (health) {
+      const text = describeHealth(health);
+      status.box.className = "status ready";
+      status.headline.textContent = text.headline;
+      status.detail.textContent = text.detail;
+    } else {
+      status.box.className = "status failed";
+      status.headline.textContent = "The server didn't respond within 60 seconds.";
+      status.detail.textContent =
+        "It may be down, or still waking up. Wait a moment, then try again. " +
+        "If it keeps failing, check your internet connection.";
+      status.retry.hidden = false;
+    }
+  }
+
+  status.retry.addEventListener("click", checkServer);
+  checkServer();
+}
+
+if (typeof document !== "undefined") startPage();
+</script>
 </body>
 </html>

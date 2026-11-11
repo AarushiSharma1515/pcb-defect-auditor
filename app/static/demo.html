@@ -1,0 +1,779 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PCB Defect Auditor Demo</title>
+<style>
+  /* One self-contained page: no frameworks, no CDN, no external fonts or images. */
+  :root {
+    --bg: #f6f7f9;
+    --card: #ffffff;
+    --text: #1b1f24;
+    --muted: #5b6470;
+    --border: #d9dee5;
+    --accent: #0b6bcb;
+    --ok: #1a7f37;
+    --warn-bg: #fff4d6;
+    --warn-text: #6b4d00;
+    --error-bg: #fde7e9;
+    --error-text: #8c1d24;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1216;
+      --card: #181c22;
+      --text: #e6e9ee;
+      --muted: #9aa4b2;
+      --border: #2c333d;
+      --accent: #5aa9ff;
+      --ok: #4ac26b;
+      --warn-bg: #3a2f10;
+      --warn-text: #f5d77a;
+      --error-bg: #3d1a1e;
+      --error-text: #ffb3ba;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main {
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 24px 16px 32px;   /* 16px side gutter on phones */
+  }
+  h1 { font-size: 1.6rem; line-height: 1.25; margin: 0 0 8px; }
+  h2 { font-size: 1.15rem; margin: 0 0 12px; }
+  p { margin: 0 0 12px; }
+  a { color: var(--accent); }
+  .intro { color: var(--muted); }
+  .links { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 0; padding: 0; list-style: none; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin: 16px 0;
+  }
+  /* Server status banner */
+  .status {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px 14px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--card);
+    margin: 16px 0;
+  }
+  .status p { margin: 0; }
+  .status .detail { color: var(--muted); font-size: 0.9rem; }
+  .status.ready { border-color: var(--ok); }
+  .status.ready .headline { color: var(--ok); font-weight: 600; }
+  .status.failed { background: var(--error-bg); color: var(--error-text); border-color: transparent; }
+  .status.failed .detail { color: inherit; }
+  .spinner {
+    flex: none;
+    width: 18px; height: 18px; margin-top: 3px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } }
+  button {
+    font: inherit;
+    cursor: pointer;
+    border-radius: 8px;
+    border: 1px solid var(--accent);
+    background: var(--accent);
+    color: #fff;
+    padding: 6px 14px;
+    margin-top: 8px;
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  [hidden] { display: none !important; }
+
+  /* Upload box */
+  .drop {
+    border: 2px dashed var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    text-align: center;
+  }
+  .drop.dragging { border-color: var(--accent); }
+  .drop input[type=file] { max-width: 100%; font: inherit; }
+  .hint { color: var(--muted); font-size: 0.875rem; margin: 8px 0 0; }
+
+  /* Sample thumbnails: as many columns as fit, at least two on a phone */
+  .samples {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 10px;
+  }
+  .sample {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    text-align: left;
+    font-size: 0.8rem;
+  }
+  .sample img { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; background: #000; }
+  .sample span { display: block; padding: 4px 6px; overflow-wrap: anywhere; }
+  .sample:hover, .sample:focus-visible { border-color: var(--accent); }
+
+  /* Messages */
+  .message { padding: 10px 12px; border-radius: 8px; margin: 12px 0 0; }
+  .message.error { background: var(--error-bg); color: var(--error-text); }
+  .message.warning { background: var(--warn-bg); color: var(--warn-text); }
+  .busy { display: flex; align-items: center; gap: 10px; color: var(--muted); }
+  .busy .spinner { margin-top: 0; }
+
+  /* Result: image with boxes, then the table */
+  canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+    border-radius: 8px;
+    background: #000;
+  }
+  .table-wrap { overflow-x: auto; margin: 12px 0; }   /* the table scrolls, not the page */
+  table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; white-space: normal; vertical-align: bottom; }
+  @media (max-width: 480px) {
+    .card { padding: 12px; }
+    table { font-size: 0.82rem; }
+    th, td { padding: 6px 5px; }
+  }
+  td.num { font-variant-numeric: tabular-nums; }
+  .swatch {
+    display: inline-block;
+    width: 12px; height: 12px;
+    border-radius: 3px;
+    margin-right: 6px;
+    vertical-align: -1px;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+  }
+  .facts { list-style: none; padding: 0; margin: 12px 0 0; }
+  .facts li { margin: 2px 0; }
+  .facts strong { font-weight: 600; }
+
+  footer {
+    color: var(--muted);
+    font-size: 0.875rem;
+    border-top: 1px solid var(--border);
+    margin-top: 24px;
+    padding-top: 12px;
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>PCB Defect Auditor</h1>
+    <p class="intro">
+      Upload a photo of a bare printed circuit board and a YOLOv8 model finds and outlines
+      six kinds of manufacturing defect: open, short, mousebite, spur, spurious copper and pin-hole.
+    </p>
+    <ul class="links">
+      <li><a href="/docs">API documentation (/docs)</a></li>
+      <li><a href="https://github.com/AarushiSharma1515/pcb-defect-auditor">Source code on GitHub</a></li>
+    </ul>
+  </header>
+
+  <section id="server-status" class="status" role="status" aria-live="polite">
+    <div class="spinner" id="status-spinner" aria-hidden="true"></div>
+    <div>
+      <p class="headline" id="status-headline">Waking up the server (free hosting sleeps when idle). This can take up to 60 seconds.</p>
+      <p class="detail" id="status-detail"></p>
+      <button type="button" id="status-retry" hidden>Try again</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2><label for="file-input">Upload your own PCB image</label></h2>
+    <div class="drop" id="drop-zone">
+      <input type="file" id="file-input" accept=".jpg,.jpeg,.png,image/jpeg,image/png">
+      <p class="hint">JPEG or PNG, up to 10 MB. You can also drag a file here.</p>
+    </div>
+    <p class="hint" id="privacy-note">Your image is analysed and then discarded; it is not stored. Only the result (defect type, confidence, timing) is saved, plus the standard request logs (time, network address) that any web server keeps — never your image or its file name.</p>
+    <p class="message error" id="upload-error" role="alert" hidden></p>
+  </section>
+
+  <section class="card" id="samples-section" hidden>
+    <h2>Or try a sample board</h2>
+    <div class="samples" id="samples-list"></div>
+  </section>
+
+  <p id="no-samples-note" hidden>
+    No sample board handy? <a href="https://github.com/tangsanli5201/DeepPCB">Download test images from the DeepPCB dataset (research use only)</a>
+  </p>
+
+  <section class="card" id="results" hidden aria-live="polite">
+    <h2>Result</h2>
+    <div class="busy" id="busy" hidden>
+      <div class="spinner" aria-hidden="true"></div>
+      <p>Inspecting… (the first inspection after the server wakes up can take a little longer)</p>
+    </div>
+    <p class="message error" id="inspect-error" role="alert" hidden></p>
+    <p class="message warning" id="partial-notice" hidden>Result is valid; saving it to the database failed.</p>
+    <div id="result-body" hidden>
+      <canvas id="result-canvas" role="img" aria-label="The inspected image with a box around each detected defect"></canvas>
+      <p id="no-detections" hidden><strong>No defects detected</strong></p>
+      <div class="table-wrap" id="detections-wrap">
+        <table>
+          <thead>
+            <tr><th>Defect</th><th>Confidence</th><th>Box [x1, y1, x2, y2] (px)</th></tr>
+          </thead>
+          <tbody id="detections-rows"></tbody>
+        </table>
+      </div>
+      <ul class="facts">
+        <li><strong>Processing time:</strong> <span id="fact-time"></span></li>
+        <li><strong>Needs human review:</strong> <span id="fact-review"></span></li>
+        <li><strong>Image size:</strong> <span id="fact-size"></span></li>
+      </ul>
+    </div>
+  </section>
+
+  <footer>
+    Trained on DeepPCB (Kaggle repackaging, 1,200/150/150 split). Not validated on real factory images.
+  </footer>
+</main>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------- settings
+const HEALTH_TIMEOUT_MS = 60000;      // free hosting can take up to a minute to wake up
+const HEALTH_RETRY_DELAY_MS = 2000;   // wait between attempts while it is waking
+const WAKING_MESSAGE =
+  "Waking up the server (free hosting sleeps when idle). This can take up to 60 seconds.";
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;   // same limit as the server (app/main.py)
+const INSPECT_TIMEOUT_MS = 90000;            // the first inspection after waking can be slow
+const BOARD_ID = "demo";
+const MAX_CANVAS_SIDE = 2048;   // phone browsers refuse very large canvases
+
+// One colour per defect type (the model's class names). Also used in the table.
+const DEFECT_COLOURS = {
+  "Open": "#e6194b",       // red
+  "Short": "#f58231",      // orange
+  "Mousebite": "#ffe119",  // yellow
+  "Spur": "#3cb44b",       // green
+  "Copper": "#42d4f4",     // cyan
+  "Pin-hole": "#f032e6",   // magenta
+};
+const UNKNOWN_COLOUR = "#a9a9a9";
+
+// ---------------------------------------------------------------- pure helpers
+// (No page access in here, so tests can run them in Node.)
+
+/** Turn a /health reply into the banner text: {headline, detail}. */
+function describeHealth(health) {
+  const notes = [];
+  if (!health || health.model_loaded !== true) {
+    notes.push("The model is not loaded on the server, so inspections will fail.");
+  }
+  if (health && health.database !== "ok") {
+    notes.push("The database is unreachable: results will be shown but not saved.");
+  }
+  const version = health && health.version ? "Server version " + health.version + "." : "";
+  return { headline: "Ready", detail: [version].concat(notes).filter(Boolean).join(" ") };
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** "JPEG", "PNG" or null, from the file's first bytes (the same check the server does). */
+function imageFormat(firstBytes) {
+  const starts = (sig) => sig.every((byte, i) => firstBytes[i] === byte);
+  if (starts([0xff, 0xd8, 0xff])) return "JPEG";
+  if (starts([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "PNG";
+  return null;
+}
+
+/** Check a chosen file before uploading it. Returns an error message, or null if it's fine. */
+function checkFile(size, firstBytes) {
+  if (size === 0) return "The file is empty. Please choose a JPEG or PNG image.";
+  if (size > MAX_UPLOAD_BYTES) {
+    return "That file is " + (size / 1024 / 1024).toFixed(1) + " MB; the limit is 10 MB. " +
+           "Please choose a smaller image.";
+  }
+  if (!imageFormat(firstBytes)) {
+    return "That file isn't a JPEG or PNG image. Please choose a .jpg or .png file.";
+  }
+  return null;
+}
+
+/**
+ * A plain-English message for a failed /inspect call.
+ * status: the HTTP status, or "network" (no connection) / "timeout" (took too long).
+ * body: the parsed JSON error body, if there was one.
+ */
+function errorMessage(status, body) {
+  const detail = body && typeof body.detail === "string" ? body.detail : "";
+  switch (status) {
+    case "network":
+      return "Couldn't reach the server. Check your internet connection; if the server " +
+             "was asleep, wait a moment and try again.";
+    case "timeout":
+      return "The server took too long to answer. It may still be waking up; please try again.";
+    case 400:
+      return "The server couldn't use that image. " +
+             (detail || "Please upload a valid JPEG or PNG image.");
+    case 413:
+      return "The image is too large. " +
+             (detail || "The limits are 10 MB and 25 megapixels.");
+    case 422:
+      return "The request was incomplete (for example, the image or board ID was missing). " +
+             "Please choose the image again.";
+    case 500:
+      return "The server hit an unexpected error while inspecting the image. Please try " +
+             "again; if it keeps happening, try a different image.";
+    case 502:
+    case 503:
+    case 504:
+      return "The server is temporarily unavailable (it may still be starting up, or its " +
+             "database may be down). Please try again in a minute.";
+    default:
+      return "Something went wrong (HTTP " + status + "). Please try again.";
+  }
+}
+
+// ---- drawing helpers
+
+function colourFor(defectType) {
+  return Object.prototype.hasOwnProperty.call(DEFECT_COLOURS, defectType)
+    ? DEFECT_COLOURS[defectType] : UNKNOWN_COLOUR;
+}
+
+/** WCAG relative luminance of a "#rrggbb" colour. */
+function luminance(hex) {
+  const channel = (i) => {
+    const c = parseInt(hex.slice(i, i + 2), 16) / 255;
+    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5);
+}
+
+function contrastRatio(hexA, hexB) {
+  const [a, b] = [luminance(hexA), luminance(hexB)].sort((x, y) => y - x);
+  return (a + 0.05) / (b + 0.05);
+}
+
+/** Black or white label text, whichever is easier to read on this background. */
+function textColourOn(hex) {
+  return contrastRatio(hex, "#000000") >= contrastRatio(hex, "#ffffff") ? "#000000" : "#ffffff";
+}
+
+/** Canvas size for an image: its own size, shrunk so the longest side is at most maxSide. */
+function canvasSize(width, height, maxSide = MAX_CANVAS_SIDE) {
+  const scale = Math.min(1, maxSide / Math.max(width, height));
+  return { width: Math.round(width * scale), height: Math.round(height * scale) };
+}
+
+/**
+ * A box [x1, y1, x2, y2] in ORIGINAL image pixels (imageWidth x imageHeight, as the server
+ * reports them) -> {x, y, w, h} on a canvas of canvasWidth x canvasHeight.
+ */
+function scaleBox(box, imageWidth, imageHeight, canvasWidth, canvasHeight) {
+  const sx = canvasWidth / imageWidth;
+  const sy = canvasHeight / imageHeight;
+  const [x1, y1, x2, y2] = box;
+  return { x: x1 * sx, y: y1 * sy, w: (x2 - x1) * sx, h: (y2 - y1) * sy };
+}
+
+/** Where a label of labelW x labelH goes for a box: just above it, or inside its top if there's
+ *  no room above; always kept inside the canvas. */
+function placeLabel(box, labelW, labelH, canvasWidth, canvasHeight) {
+  const x = Math.max(0, Math.min(box.x, canvasWidth - labelW));
+  const above = box.y - labelH;
+  const y = above >= 0 ? above : Math.max(0, Math.min(box.y, canvasHeight - labelH));
+  return { x, y };
+}
+
+function overlaps(a, b) {
+  return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+}
+
+/**
+ * Positions for every label, so labels don't cover each other where defects are close together.
+ * items: [{box, w, h}] with the most important first (it gets the best spot). For each label,
+ * try: above the box, below it, inside its top, then further up or down; take the first spot
+ * that doesn't overlap a label already placed (or "above" if nothing is free).
+ */
+function layoutLabels(items, canvasWidth, canvasHeight) {
+  const placed = [];
+  return items.map(({ box, w, h }) => {
+    const clampX = Math.max(0, Math.min(box.x, canvasWidth - w));
+    const clampY = (y) => Math.max(0, Math.min(y, canvasHeight - h));
+    const above = placeLabel(box, w, h, canvasWidth, canvasHeight);
+    const candidates = [above, { x: clampX, y: clampY(box.y + box.h) }, { x: clampX, y: clampY(box.y) }];
+    for (let k = 1; k <= 6; k++) {
+      candidates.push({ x: clampX, y: clampY(box.y - h * (k + 1)) });
+      candidates.push({ x: clampX, y: clampY(box.y + box.h + h * k) });
+    }
+    const free = candidates.find((c) => !placed.some((p) => overlaps({ x: c.x, y: c.y, w, h }, p)));
+    const spot = free || above;
+    placed.push({ x: spot.x, y: spot.y, w, h });
+    return spot;
+  });
+}
+
+function formatPercent(confidence, decimals) {
+  return (confidence * 100).toFixed(decimals) + "%";
+}
+
+function labelText(detection) {
+  return detection.defect_type + " " + formatPercent(detection.confidence, 0);
+}
+
+function formatBox(box) {
+  return "[" + box.map((v) => Math.round(v)).join(", ") + "]";
+}
+
+/**
+ * Send one image to POST /inspect. Never throws: resolves with
+ * {ok: true, result} or {ok: false, message} (a plain-English error).
+ */
+async function inspectImage(fetchFn, blob, filename, timeoutMs = INSPECT_TIMEOUT_MS) {
+  const form = new FormData();
+  form.append("board_id", BOARD_ID);
+  form.append("file", blob, filename);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let response;
+  try {
+    response = await fetchFn("/inspect", { method: "POST", body: form, signal: controller.signal });
+  } catch (error) {
+    return { ok: false, message: errorMessage(controller.signal.aborted ? "timeout" : "network") };
+  } finally {
+    clearTimeout(timer);
+  }
+  let body = null;
+  try { body = await response.json(); } catch (error) { /* not JSON, e.g. an HTML error page */ }
+  if (!response.ok) return { ok: false, message: errorMessage(response.status, body) };
+  if (!body || !body.telemetry) {
+    return { ok: false, message: "The server sent a reply this page couldn't read. Please try again." };
+  }
+  return { ok: true, result: body };
+}
+
+/**
+ * Ask /health until it answers 200 or the time budget runs out.
+ * A sleeping free host may refuse connections or answer 502/503 while it starts,
+ * so failures are retried; each attempt is cut off when the budget runs out.
+ * Resolves with the parsed /health JSON, or null if it never answered.
+ */
+async function waitForHealth(fetchFn, timeoutMs, retryDelayMs = HEALTH_RETRY_DELAY_MS) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), deadline - Date.now());
+    try {
+      const response = await fetchFn("/health", { signal: controller.signal, cache: "no-store" });
+      if (response.ok) return await response.json();
+    } catch (error) {
+      // network error or timeout: fall through and retry while time is left
+    } finally {
+      clearTimeout(timer);
+    }
+    await sleep(Math.min(retryDelayMs, Math.max(0, deadline - Date.now())));
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------- page
+function startPage() {
+  const $ = (id) => document.getElementById(id);
+  const status = {
+    box: $("server-status"), spinner: $("status-spinner"),
+    headline: $("status-headline"), detail: $("status-detail"), retry: $("status-retry"),
+  };
+
+  async function checkServer() {
+    status.box.className = "status";
+    status.spinner.hidden = false;
+    status.retry.hidden = true;
+    status.headline.textContent = WAKING_MESSAGE;
+    const started = Date.now();
+    const ticker = setInterval(() => {
+      status.detail.textContent = "Waiting… " + Math.round((Date.now() - started) / 1000) + " s";
+    }, 1000);
+    status.detail.textContent = "";
+
+    const health = await waitForHealth(window.fetch.bind(window), HEALTH_TIMEOUT_MS);
+    clearInterval(ticker);
+    status.spinner.hidden = true;
+
+    if (health) {
+      const text = describeHealth(health);
+      status.box.className = "status ready";
+      status.headline.textContent = text.headline;
+      status.detail.textContent = text.detail;
+    } else {
+      status.box.className = "status failed";
+      status.headline.textContent = "The server didn't respond within 60 seconds.";
+      status.detail.textContent =
+        "It may be down, or still waking up. Wait a moment, then try again. " +
+        "If it keeps failing, check your internet connection.";
+      status.retry.hidden = false;
+    }
+    loadSamples();
+  }
+
+  // ---- samples: thumbnails if the server has any, otherwise the DeepPCB note
+  let samplesLoaded = false;
+  async function loadSamples() {
+    if (samplesLoaded) return;
+    let names = [];
+    try {
+      const response = await fetch("/samples", { cache: "no-store" });
+      if (response.ok) names = await response.json();
+      samplesLoaded = response.ok;
+    } catch (error) { /* treat like "no samples" */ }
+    names = Array.isArray(names) ? names.filter((n) => typeof n === "string") : [];
+
+    const list = $("samples-list");
+    list.replaceChildren();
+    for (const name of names) {
+      const url = "/samples/" + encodeURIComponent(name);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "sample";
+      const img = document.createElement("img");
+      img.src = url;
+      img.alt = "";
+      img.loading = "lazy";
+      const label = document.createElement("span");
+      label.textContent = name;
+      button.append(img, label);
+      button.addEventListener("click", () => inspectSample(url, name));
+      list.append(button);
+    }
+    $("samples-section").hidden = names.length === 0;
+    $("no-samples-note").hidden = names.length > 0;
+  }
+
+  async function inspectSample(url, name) {
+    let blob;
+    try {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      blob = await response.blob();
+    } catch (error) {
+      showError("Couldn't load that sample image from the server. Please try again.");
+      return;
+    }
+    run(blob, name);
+  }
+
+  // ---- upload: check the file in the browser first, then send it
+  const fileInput = $("file-input");
+  const uploadError = $("upload-error");
+
+  async function handleFile(file) {
+    uploadError.hidden = true;
+    if (!file) return;
+    const firstBytes = new Uint8Array(await file.slice(0, 8).arrayBuffer());
+    const problem = checkFile(file.size, firstBytes);
+    if (problem) {
+      uploadError.textContent = problem;
+      uploadError.hidden = false;
+      return;
+    }
+    run(file, file.name);
+  }
+
+  fileInput.addEventListener("change", () => {
+    handleFile(fileInput.files[0]);
+    fileInput.value = "";   // so choosing the same file again still triggers "change"
+  });
+  const drop = $("drop-zone");
+  drop.addEventListener("dragover", (event) => { event.preventDefault(); drop.classList.add("dragging"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("dragging"));
+  drop.addEventListener("drop", (event) => {
+    event.preventDefault();
+    drop.classList.remove("dragging");
+    handleFile(event.dataTransfer.files[0]);
+  });
+
+  // ---- inspecting and showing the result
+  const results = {
+    box: $("results"), busy: $("busy"), error: $("inspect-error"),
+    partial: $("partial-notice"), body: $("result-body"), canvas: $("result-canvas"),
+    none: $("no-detections"), tableWrap: $("detections-wrap"), rows: $("detections-rows"),
+    time: $("fact-time"), review: $("fact-review"), size: $("fact-size"),
+  };
+  let busy = false;
+
+  function setBusy(on) {
+    busy = on;
+    results.busy.hidden = !on;
+    fileInput.disabled = on;
+    for (const button of document.querySelectorAll(".sample")) button.disabled = on;
+  }
+
+  function showError(message) {
+    results.box.hidden = false;
+    results.body.hidden = true;
+    results.partial.hidden = true;
+    results.error.textContent = message;
+    results.error.hidden = false;
+  }
+
+  async function run(blob, filename) {
+    if (busy) return;
+    results.box.hidden = false;
+    results.error.hidden = true;
+    results.partial.hidden = true;
+    results.body.hidden = true;
+    setBusy(true);
+    results.box.scrollIntoView({ behavior: "smooth", block: "start" });
+    try {
+      const outcome = await inspectImage(window.fetch.bind(window), blob, filename);
+      if (!outcome.ok) {
+        showError(outcome.message);
+        return;
+      }
+      await showResult(outcome.result, blob);
+    } catch (error) {
+      showError("Something went wrong while showing the result. Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  let lastDrawing = null;   // {image, result}, so the boxes can be redrawn when the screen resizes
+
+  async function showResult(result, blob) {
+    results.partial.hidden = result.status !== "partial_success";
+    const detections = Array.isArray(result.detections) ? result.detections : [];
+
+    // Table (built with textContent, never innerHTML)
+    results.rows.replaceChildren();
+    detections.forEach((det) => {
+      const row = document.createElement("tr");
+      const cells = [det.defect_type, formatPercent(det.confidence, 1), formatBox(det.box)];
+      cells.forEach((text, col) => {
+        const td = document.createElement("td");
+        if (col === 0) {
+          const swatch = document.createElement("span");
+          swatch.className = "swatch";
+          swatch.style.background = colourFor(det.defect_type);
+          td.append(swatch);
+        } else {
+          td.className = "num";
+        }
+        td.append(document.createTextNode(text));
+        row.append(td);
+      });
+      results.rows.append(row);
+    });
+    results.none.hidden = detections.length > 0;
+    results.tableWrap.hidden = detections.length === 0;
+
+    const telemetry = result.telemetry || {};
+    results.time.textContent = Number.isFinite(telemetry.processing_ms) ? telemetry.processing_ms + " ms" : "unknown";
+    results.review.textContent = result.requires_human_review
+      ? "Yes (the model's top confidence is below 50%)"
+      : "No";
+    results.size.textContent = result.image_width && result.image_height
+      ? result.image_width + " × " + result.image_height + " px" : "unknown";
+
+    // Image with boxes. The body must be visible first so the canvas has a display size.
+    results.body.hidden = false;
+    const url = URL.createObjectURL(blob);
+    try {
+      const image = new Image();
+      image.src = url;
+      await image.decode();
+      lastDrawing = { image, result: Object.assign({}, result, { detections }) };
+      draw();
+    } catch (error) {
+      lastDrawing = null;
+      results.canvas.hidden = true;   // the table above still shows every result
+      return;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  function draw() {
+    if (!lastDrawing) return;
+    const { image, result } = lastDrawing;
+    const canvas = results.canvas;
+    canvas.hidden = false;
+    const size = canvasSize(image.naturalWidth, image.naturalHeight);
+    canvas.width = size.width;
+    canvas.height = size.height;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(image, 0, 0, size.width, size.height);
+
+    // Canvas pixels per screen pixel, so lines and text look the same size on any screen
+    const perScreenPx = size.width / Math.max(1, canvas.getBoundingClientRect().width);
+    const lineWidth = 2 * perScreenPx;
+    const fontPx = 13 * perScreenPx;
+    const padding = 3 * perScreenPx;
+    ctx.font = "600 " + fontPx + "px system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
+    ctx.textBaseline = "top";
+
+    const imageWidth = result.image_width || image.naturalWidth;
+    const imageHeight = result.image_height || image.naturalHeight;
+    // Detections arrive best first; that order also decides who gets the best label spot
+    const items = result.detections.map((det) => {
+      const text = labelText(det);
+      return {
+        det, text, colour: colourFor(det.defect_type),
+        box: scaleBox(det.box, imageWidth, imageHeight, size.width, size.height),
+        w: ctx.measureText(text).width + padding * 2,
+        h: fontPx + padding * 2,
+      };
+    });
+    const spots = layoutLabels(items, size.width, size.height);
+
+    // 1. All boxes: a dark outline first (visible on light boards), then the colour
+    for (const { box, colour } of items) {
+      ctx.lineWidth = lineWidth * 2;
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.7)";
+      ctx.strokeRect(box.x, box.y, box.w, box.h);
+      ctx.lineWidth = lineWidth;
+      ctx.strokeStyle = colour;
+      ctx.strokeRect(box.x, box.y, box.w, box.h);
+    }
+    // 2. All labels on top of the boxes; best last, so it wins if two still overlap
+    for (let i = items.length - 1; i >= 0; i--) {
+      const { text, colour, w, h } = items[i];
+      ctx.fillStyle = colour;
+      ctx.fillRect(spots[i].x, spots[i].y, w, h);
+      ctx.fillStyle = textColourOn(colour);
+      ctx.fillText(text, spots[i].x + padding, spots[i].y + padding);
+    }
+  }
+
+  let resizeTimer = null;
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(draw, 150);
+  });
+
+  status.retry.addEventListener("click", checkServer);
+  checkServer();
+}
+
+if (typeof document !== "undefined") startPage();
+</script>
+</body>
+</html>

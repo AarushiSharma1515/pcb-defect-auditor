@@ -24,6 +24,13 @@ HEALTH_DB_TIMEOUT_SECONDS = 2.0       # /health reports "unreachable" if SELECT 
 SAMPLES_DIR = Path(__file__).resolve().parents[1] / "samples"
 SAMPLE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 
+# The browser demo: one self-contained HTML file (inline CSS and JS, nothing external)
+DEMO_PAGE = Path(__file__).resolve().parent / "static" / "demo.html"
+# Inspections from the demo page use this board_id. For those, the visitor's real file name
+# is never saved (or printed in database error messages); this generic value is used instead.
+DEMO_BOARD_ID = "demo"
+DEMO_IMAGE_PATH = "demo-upload"
+
 logger = logging.getLogger(__name__)
 
 ml_engine = {}
@@ -152,6 +159,11 @@ def get_sample(name: str):
         raise HTTPException(status_code=404, detail=f"No sample image named '{name}'.")
     return FileResponse(path)
 
+
+@app.get("/demo", include_in_schema=False)   # a web page, not an API endpoint, so not in /docs
+def demo_page():
+    return FileResponse(DEMO_PAGE, media_type="text/html")
+
 @app.exception_handler(OperationalError)
 async def database_unavailable(request: Request, exc: OperationalError):
     """Any endpoint that can't reach the database answers 503 (try again later) with a
@@ -265,9 +277,10 @@ def inspect_pcb(
     # 4. Flag low-confidence predictions
     requires_human_review = bool(confidence_float < 0.50)
     # 5. Database logging (retried once if the connection was dropped)
+    #    The image itself is never saved, only this row. Demo uploads don't keep the file name.
     saved = save_inspection(db, {
         "board_id": board_id,
-        "image_path": file.filename,
+        "image_path": DEMO_IMAGE_PATH if board_id == DEMO_BOARD_ID else file.filename,
         "defect_type": defect_type,
         "confidence": confidence_float,
         "processing_ms": processing_ms,

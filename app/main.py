@@ -4,8 +4,9 @@ load_dotenv()
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from pathlib import Path
 from fastapi import FastAPI, Depends, File, UploadFile, Form, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
@@ -18,6 +19,10 @@ from app.ml.image_checks import detect_image_format, read_image_size
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024   # 10 MB
 MAX_PIXELS = 25_000_000               # 25 megapixels (e.g. 5000 x 5000)
 HEALTH_DB_TIMEOUT_SECONDS = 2.0       # /health reports "unreachable" if SELECT 1 takes longer
+
+# Demo images served by /samples, found relative to this file (app/main.py -> repo root)
+SAMPLES_DIR = Path(__file__).resolve().parents[1] / "samples"
+SAMPLE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +114,43 @@ def health():
         "database": check_database(),
         "version": __version__,
     }
+
+
+def list_sample_files() -> dict:
+    """{file name: path} for the images directly inside SAMPLES_DIR; {} if the folder is missing.
+    Only real files whose resolved location is inside the folder count, so a link that
+    points somewhere else on the disk is never served."""
+    folder = SAMPLES_DIR.resolve()
+    if not folder.is_dir():
+        return {}
+    return {
+        path.name: path
+        for path in folder.iterdir()
+        if path.suffix.lower() in SAMPLE_EXTENSIONS
+        and path.is_file()
+        and path.resolve().parent == folder
+    }
+
+
+@app.get("/samples")
+def list_samples():
+    """Names of the demo images in samples/ (an empty list if there are none)."""
+    return sorted(list_sample_files())
+
+
+@app.get("/samples/{name}", responses={
+    400: {"description": "The name contains a path (/, \\ or ..)"},
+    404: {"description": "No such sample image"},
+})
+def get_sample(name: str):
+    # Only a bare file name is accepted, never a path like ../.env or ..\secret.jpg
+    if "/" in name or "\\" in name or ".." in name:
+        raise HTTPException(status_code=400, detail="Give a sample file name, not a path.")
+    # And it must be one of the files /samples lists (an allowlist, not a path lookup)
+    path = list_sample_files().get(name)
+    if path is None:
+        raise HTTPException(status_code=404, detail=f"No sample image named '{name}'.")
+    return FileResponse(path)
 
 @app.exception_handler(OperationalError)
 async def database_unavailable(request: Request, exc: OperationalError):

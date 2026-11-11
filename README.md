@@ -69,6 +69,10 @@ The model detects six PCB fabrication defects, trained on the DeepPCB dataset:
 - **No background/negative class.** There's no dedicated category for "this isn't a defect" — every confident detection gets forced into one of the six known classes.
 - **Content-type validation works correctly for non-image files.** A `.pdf` sent to `/inspect` was correctly rejected with a `400`, confirmed directly against the live deployment.
 - **Slow on the free tier, especially after a sleep.** Render's free tier puts the service to sleep when it isn't used, and the first request has to wake it up. Even when it is awake, its small CPU means a request can take several seconds, much more than the 47 ms per image measured on a laptop (see [Benchmark](#benchmark)).
+- **One image at a time.** `/inspect` takes a single image per request; there is no batch upload.
+- **Only the top defect is saved.** The response lists every detection, but the database stores one row per inspection: the most confident defect. The other detections are not kept.
+- **No authentication or rate limiting.** Anyone with the URL can upload images and read the logged inspections, and nothing limits how many requests a client sends.
+- **Trained on one dataset.** The model has only seen DeepPCB, whose defects were added artificially to images of real boards (see [A note on the dataset](#a-note-on-the-dataset)). Real factory images, with other cameras, lighting, resolutions and board types, may look quite different, and the scores above may not hold for them.
 
 ---
 

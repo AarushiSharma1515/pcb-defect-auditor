@@ -53,11 +53,11 @@ def test_each_class_gets_a_different_image(tmp_path):
     assert stems[:2] == ["both", "short2"]
 
 
-def test_copies_images_and_writes_readme(tmp_path, capsys):
+def test_copies_images_and_writes_readme(tmp_path):
     src = make_split(tmp_path / "valid", DATASET)
     dest = tmp_path / "samples"
 
-    assert pick_samples.main(["--src", str(src), "--dest", str(dest), "--licence", "Test licence 1.0"]) == 0
+    assert pick_samples.main(["--src", str(src), "--dest", str(dest)]) == 0
 
     images = sorted(p.name for p in dest.glob("*.jpg"))
     assert images == [
@@ -66,18 +66,26 @@ def test_copies_images_and_writes_readme(tmp_path, capsys):
     ]
     assert (dest / "2_short_short_1.jpg").read_bytes() == b"image short_1"   # an exact copy
 
-    readme = (dest / "README.md").read_text(encoding="utf-8")
-    assert "**Source:** DeepPCB" in readme
-    assert "**Licence:** Test licence 1.0" in readme
-    assert "`short_1.jpg`" in readme                  # names the original file
-    assert "WARNING" not in capsys.readouterr().out
+    # The README is fixed text: it never lists the picked files, so re-running never changes it
+    assert (dest / "README.md").read_text(encoding="utf-8") == pick_samples.README_TEXT
+    assert "short_1" not in pick_samples.README_TEXT
 
 
-def test_warns_when_licence_is_still_a_placeholder(tmp_path, capsys):
-    src = make_split(tmp_path / "valid", DATASET)
-    pick_samples.main(["--src", str(src), "--dest", str(tmp_path / "samples")])
-    assert pick_samples.LICENCE_PLACEHOLDER in (tmp_path / "samples" / "README.md").read_text(encoding="utf-8")
-    assert "WARNING" in capsys.readouterr().out
+def test_readme_has_the_exact_credit_line():
+    readme = pick_samples.README_TEXT
+    assert pick_samples.CREDIT_LINE in readme
+    assert "https://github.com/tangsanli5201/DeepPCB" in readme
+    assert '"On-line PCB Defect Detector On A New PCB Defect Dataset"' in readme
+    assert "may only be used for research purposes" in readme
+    assert "The current version of this repository contains no dataset images." in readme
+    assert "redistributed" not in readme       # the images remain in git history, so don't claim that
+    assert "intentionally empty" in readme
+    assert "Tang et al" not in readme
+
+
+def test_committed_readme_matches_what_the_script_writes():
+    committed = SCRIPT.parents[1] / "samples" / "README.md"
+    assert committed.read_text(encoding="utf-8") == pick_samples.README_TEXT
 
 
 def test_dry_run_copies_nothing(tmp_path):

@@ -8,3 +8,9 @@ models/best.pt
 !models/pcb_defect_v1.onnx
 
 data/
+
+# Dataset images copied by scripts/pick_samples.py stay local (DeepPCB is research-use only;
+# the current version of this repo contains no dataset images). samples/README.md stays tracked.
+samples/*.jpg
+samples/*.jpeg
+samples/*.png

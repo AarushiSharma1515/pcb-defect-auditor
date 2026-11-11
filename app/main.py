@@ -11,14 +11,17 @@ from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 from app import __version__
-from app.db.database import get_db, engine, Base
+from app.db.database import DB_CONNECT_TIMEOUT_SECONDS, get_db, engine, Base
 from app.db.models import Inspection
 from app.ml.inference import DEFAULT_MODEL_PATH, PCBDefectModel
 from app.ml.image_checks import detect_image_format, read_image_size
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024   # 10 MB
 MAX_PIXELS = 25_000_000               # 25 megapixels (e.g. 5000 x 5000)
-HEALTH_DB_TIMEOUT_SECONDS = 2.0       # /health reports "unreachable" if SELECT 1 takes longer
+# /health reports "unreachable" if SELECT 1 takes longer than this. A sleeping Neon database
+# can take several seconds to wake, so allow the full connect timeout plus a moment for the
+# query; otherwise the first /health after a quiet spell wrongly says "unreachable".
+HEALTH_DB_TIMEOUT_SECONDS = DB_CONNECT_TIMEOUT_SECONDS + 1.0
 
 # Demo images served by /samples, found relative to this file (app/main.py -> repo root)
 SAMPLES_DIR = Path(__file__).resolve().parents[1] / "samples"

@@ -78,7 +78,10 @@ def test_inspect_valid_image(client):
     fake_model.predict.return_value = {
         "defect_type": "short_circuit",
         "confidence": 0.985,
-        "processing_ms": 115
+        "processing_ms": 115,
+        "detections": [{"defect_type": "short_circuit", "confidence": 0.985, "box": [10, 10, 20, 20]}],
+        "image_width": 64,
+        "image_height": 64,
     }
     
     # Inject the fake model into your app's memory
@@ -105,11 +108,22 @@ CONNECTION_DROPPED = OperationalError(
 )
 
 
+# What the fake model returns: two defects on a 64x64 image, best first
+FAKE_PREDICTION = {
+    "defect_type": "Short", "confidence": 0.985, "processing_ms": 115,
+    "detections": [
+        {"defect_type": "Short", "confidence": 0.985, "box": [5, 5, 15, 15]},
+        {"defect_type": "Spur", "confidence": 0.61, "box": [40, 40, 50, 52]},
+    ],
+    "image_width": 64, "image_height": 64,
+}
+
+
 def use_fake_model():
     """Replace the ONNX model with a fake one, so these tests only exercise the database logic."""
     from app.main import ml_engine
     fake_model = MagicMock()
-    fake_model.predict.return_value = {"defect_type": "Short", "confidence": 0.985, "processing_ms": 115}
+    fake_model.predict.return_value = FAKE_PREDICTION
     ml_engine["model"] = fake_model
 
 
@@ -401,3 +415,65 @@ def test_board_id_of_exactly_100_characters_is_accepted(client):
     assert response.status_code == 200
     assert response.json()["status"] == "success"
     assert count_rows(board_id) == 1
+
+
+# ---------------------------------------------------------------- all detections
+
+def test_inspect_returns_all_detections_and_keeps_old_fields(client):
+    use_fake_model()
+    response = client.post("/inspect", data={"board_id": "all_dets"},
+                           files={"file": ("board.jpg", make_image(".jpg"), "image/jpeg")})
+    body = response.json()
+
+    assert response.status_code == 200
+    # Existing fields are unchanged...
+    assert body["status"] == "success"
+    assert body["board_id"] == "all_dets"
+    assert body["requires_human_review"] is False
+    assert body["telemetry"] == {"defect_type": "Short", "confidence": 0.985, "processing_ms": 115}
+    # ...and the new ones are added
+    assert body["detections"] == FAKE_PREDICTION["detections"]
+    assert body["image_width"] == 64 and body["image_height"] == 64
+
+
+def test_partial_success_also_returns_all_detections(client):
+    use_fake_model()
+    response, _ = post_with_failing_commits(client, "dets_db_down", [CONNECTION_DROPPED, CONNECTION_DROPPED])
+    body = response.json()
+
+    assert body["status"] == "partial_success"
+    assert "database logging failed" in body["message"]
+    assert len(body["detections"]) == 2
+    assert body["image_width"] == 64
+
+
+def test_database_still_saves_only_the_top_defect(client):
+    use_fake_model()
+    client.post("/inspect", data={"board_id": "top_only"},
+                files={"file": ("board.jpg", make_image(".jpg"), "image/jpeg")})
+    with TestingSessionLocal() as db:
+        rows = db.query(Inspection).filter_by(board_id="top_only").all()
+    assert [(row.defect_type, float(row.confidence)) for row in rows] == [("Short", 0.985)]
+
+
+def test_real_model_boxes_are_in_original_image_pixels(client):
+    # The real ONNX model on a non-square 800x600 image (a trace-like pattern, so it may
+    # or may not find "defects"; either way every box must lie inside the ORIGINAL image)
+    img = np.full((600, 800, 3), 30, np.uint8)
+    for x in range(0, 800, 40):
+        cv2.line(img, (x, 0), (x, 599), (60, 160, 200), 6)
+    response = client.post("/inspect", data={"board_id": "real_boxes"},
+                           files={"file": ("board.png", cv2.imencode(".png", img)[1].tobytes(), "image/png")})
+    body = response.json()
+
+    assert response.status_code == 200
+    assert (body["image_width"], body["image_height"]) == (800, 600)
+    assert isinstance(body["detections"], list)
+    for det in body["detections"]:
+        x1, y1, x2, y2 = det["box"]
+        assert 0 <= x1 <= x2 <= 800 and 0 <= y1 <= y2 <= 600
+        assert 0.25 < det["confidence"] <= 1
+    if body["detections"]:
+        assert body["telemetry"]["defect_type"] == body["detections"][0]["defect_type"]
+    else:
+        assert body["telemetry"]["defect_type"] == "no_defect_detected"

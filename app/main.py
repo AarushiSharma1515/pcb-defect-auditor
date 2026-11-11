@@ -2,19 +2,27 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from pathlib import Path
 from fastapi import FastAPI, Depends, File, UploadFile, Form, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
+from app import __version__
 from app.db.database import get_db, engine, Base
 from app.db.models import Inspection
-from app.ml.inference import PCBDefectModel
+from app.ml.inference import DEFAULT_MODEL_PATH, PCBDefectModel
 from app.ml.image_checks import detect_image_format, read_image_size
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024   # 10 MB
 MAX_PIXELS = 25_000_000               # 25 megapixels (e.g. 5000 x 5000)
+HEALTH_DB_TIMEOUT_SECONDS = 2.0       # /health reports "unreachable" if SELECT 1 takes longer
+
+# Demo images served by /samples, found relative to this file (app/main.py -> repo root)
+SAMPLES_DIR = Path(__file__).resolve().parents[1] / "samples"
+SAMPLE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +44,7 @@ async def lifespan(app: FastAPI):
     yield
     ml_engine.clear()
 
-app = FastAPI(title="PCB Defect Auditor", lifespan=lifespan)
+app = FastAPI(title="PCB Defect Auditor", version=__version__, lifespan=lifespan)
 
 
 def save_inspection(db: Session, record: dict) -> bool:
@@ -68,6 +76,81 @@ def save_inspection(db: Session, record: dict) -> bool:
 @app.get("/")
 def root():
     return {"status": "PCB Defect Auditor is running"}
+
+
+# Two small background threads for the /health database check. Running SELECT 1 there lets
+# /health stop waiting after HEALTH_DB_TIMEOUT_SECONDS, even if the database hangs instead
+# of refusing the connection. (A stuck check still ends on its own when Postgres's 5 s
+# connect_timeout expires, and only two can run at once, so they can't pile up threads.)
+_health_db_checker = ThreadPoolExecutor(max_workers=2, thread_name_prefix="health-db")
+
+
+def _select_one():
+    with engine.connect() as connection:
+        connection.execute(text("SELECT 1"))
+
+
+def check_database() -> str:
+    """'ok' if the database answers SELECT 1 within the timeout, otherwise 'unreachable'.
+    Never raises: a health check must not crash because the thing it checks is down."""
+    try:
+        _health_db_checker.submit(_select_one).result(timeout=HEALTH_DB_TIMEOUT_SECONDS)
+        return "ok"
+    except Exception as e:   # connection refused, bad credentials, timeout, anything else
+        logger.warning("Health check: database unreachable: %s", e or type(e).__name__)
+        return "unreachable"
+
+
+@app.get("/health")
+def health():
+    """Always 200, so a monitor can read the details; check the fields to see what's wrong.
+    Plain "def": the database check blocks, so FastAPI runs this in the thread pool."""
+    model = ml_engine.get("model")
+    model_loaded = isinstance(model, PCBDefectModel)
+    return {
+        "model_loaded": model_loaded,
+        "model_file": (model.model_path if model_loaded else DEFAULT_MODEL_PATH).name,
+        "mode": "onnx",
+        "database": check_database(),
+        "version": __version__,
+    }
+
+
+def list_sample_files() -> dict:
+    """{file name: path} for the images directly inside SAMPLES_DIR; {} if the folder is missing.
+    Only real files whose resolved location is inside the folder count, so a link that
+    points somewhere else on the disk is never served."""
+    folder = SAMPLES_DIR.resolve()
+    if not folder.is_dir():
+        return {}
+    return {
+        path.name: path
+        for path in folder.iterdir()
+        if path.suffix.lower() in SAMPLE_EXTENSIONS
+        and path.is_file()
+        and path.resolve().parent == folder
+    }
+
+
+@app.get("/samples")
+def list_samples():
+    """Names of the demo images in samples/ (an empty list if there are none)."""
+    return sorted(list_sample_files())
+
+
+@app.get("/samples/{name}", responses={
+    400: {"description": "The name contains a path (/, \\ or ..)"},
+    404: {"description": "No such sample image"},
+})
+def get_sample(name: str):
+    # Only a bare file name is accepted, never a path like ../.env or ..\secret.jpg
+    if "/" in name or "\\" in name or ".." in name:
+        raise HTTPException(status_code=400, detail="Give a sample file name, not a path.")
+    # And it must be one of the files /samples lists (an allowlist, not a path lookup)
+    path = list_sample_files().get(name)
+    if path is None:
+        raise HTTPException(status_code=404, detail=f"No sample image named '{name}'.")
+    return FileResponse(path)
 
 @app.exception_handler(OperationalError)
 async def database_unavailable(request: Request, exc: OperationalError):
@@ -166,6 +249,9 @@ def inspect_pcb(
         defect_type = prediction_result["defect_type"]
         confidence_float = float(prediction_result["confidence"])
         processing_ms = int(prediction_result["processing_ms"])
+        detections = prediction_result["detections"]
+        image_width = int(prediction_result["image_width"])
+        image_height = int(prediction_result["image_height"])
     except ValueError:
         # predict() raises ValueError when OpenCV can't decode the image
         raise HTTPException(
@@ -186,21 +272,9 @@ def inspect_pcb(
         "confidence": confidence_float,
         "processing_ms": processing_ms,
     })
-    if not saved:
-        return {
-            "status": "partial_success",
-            "message": "Inference completed but database logging failed.",
-            "board_id": board_id,
-            "requires_human_review": requires_human_review,
-            "telemetry": {
-                "defect_type": defect_type,
-                "confidence": round(confidence_float, 4),
-                "processing_ms": processing_ms
-            }
-        }
-
-    # 6. Final Response (Standard Success)
-    return {
+    # 6. Response. "telemetry" is the top defect (what was saved); "detections" lists every
+    #    defect found, with boxes [x1, y1, x2, y2] in the ORIGINAL image's pixels.
+    response = {
         "status": "success",
         "board_id": board_id,
         "requires_human_review": requires_human_review,
@@ -208,5 +282,12 @@ def inspect_pcb(
             "defect_type": defect_type,
             "confidence": round(confidence_float, 4),
             "processing_ms": processing_ms
-        }
+        },
+        "detections": detections,
+        "image_width": image_width,
+        "image_height": image_height,
     }
+    if not saved:
+        response["status"] = "partial_success"
+        response["message"] = "Inference completed but database logging failed."
+    return response

@@ -26,6 +26,10 @@ SAMPLE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 
 # The browser demo: one self-contained HTML file (inline CSS and JS, nothing external)
 DEMO_PAGE = Path(__file__).resolve().parent / "static" / "demo.html"
+# Inspections from the demo page use this board_id. For those, the visitor's real file name
+# is never saved (or printed in database error messages); this generic value is used instead.
+DEMO_BOARD_ID = "demo"
+DEMO_IMAGE_PATH = "demo-upload"
 
 logger = logging.getLogger(__name__)
 
@@ -273,9 +277,10 @@ def inspect_pcb(
     # 4. Flag low-confidence predictions
     requires_human_review = bool(confidence_float < 0.50)
     # 5. Database logging (retried once if the connection was dropped)
+    #    The image itself is never saved, only this row. Demo uploads don't keep the file name.
     saved = save_inspection(db, {
         "board_id": board_id,
-        "image_path": file.filename,
+        "image_path": DEMO_IMAGE_PATH if board_id == DEMO_BOARD_ID else file.filename,
         "defect_type": defect_type,
         "confidence": confidence_float,
         "processing_ms": processing_ms,

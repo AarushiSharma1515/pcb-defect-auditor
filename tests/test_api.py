@@ -477,3 +477,60 @@ def test_real_model_boxes_are_in_original_image_pixels(client):
         assert body["telemetry"]["defect_type"] == body["detections"][0]["defect_type"]
     else:
         assert body["telemetry"]["defect_type"] == "no_defect_detected"
+
+
+# ---------------------------------------------------------------- demo uploads keep no file name
+
+SECRET_NAME = "my_secret_board_rev3.jpg"
+
+
+def stored_rows(board_id):
+    with TestingSessionLocal() as db:
+        return [(row.board_id, row.image_path) for row in db.query(Inspection).filter_by(board_id=board_id)]
+
+
+def test_demo_upload_does_not_store_the_real_file_name(client):
+    use_fake_model()
+    from app.main import DEMO_BOARD_ID, DEMO_IMAGE_PATH
+    before = len(stored_rows(DEMO_BOARD_ID))
+    response = client.post("/inspect", data={"board_id": "demo"},
+                           files={"file": (SECRET_NAME, make_image(".jpg"), "image/jpeg")})
+    assert response.status_code == 200
+    assert SECRET_NAME not in response.text
+
+    rows = stored_rows(DEMO_BOARD_ID)
+    assert len(rows) == before + 1
+    assert rows[-1] == ("demo", DEMO_IMAGE_PATH) == ("demo", "demo-upload")
+    assert all(SECRET_NAME not in path for _, path in rows)
+
+
+def test_non_demo_calls_still_store_the_file_name(client):
+    use_fake_model()
+    client.post("/inspect", data={"board_id": "LINE-7"},
+                files={"file": ("panel_0042.jpg", make_image(".jpg"), "image/jpeg")})
+    assert stored_rows("LINE-7") == [("LINE-7", "panel_0042.jpg")]
+
+
+def test_demo_file_name_is_not_printed_when_saving_fails(client, capsys):
+    """SQLAlchemy's error messages include the INSERT's values, and save_inspection prints them."""
+    use_fake_model()
+    session = TestingSessionLocal()
+
+    def failing_commit():
+        row = next(iter(session.new))   # the Inspection being saved, as SQLAlchemy would report it
+        raise OperationalError("INSERT INTO inspections (board_id, image_path) VALUES (?, ?)",
+                               (row.board_id, row.image_path), Exception("connection dropped"))
+
+    session.commit = failing_commit
+    app.dependency_overrides[get_db] = lambda: session
+    try:
+        response = client.post("/inspect", data={"board_id": "demo"},
+                               files={"file": (SECRET_NAME, make_image(".jpg"), "image/jpeg")})
+    finally:
+        app.dependency_overrides[get_db] = override_get_db
+        session.close()
+
+    printed = capsys.readouterr().out
+    assert response.json()["status"] == "partial_success"
+    assert "demo-upload" in printed           # the error really did print the values...
+    assert SECRET_NAME not in printed         # ...but not the visitor's file name

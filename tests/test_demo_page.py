@@ -356,3 +356,19 @@ def test_labels_of_clustered_defects_do_not_cover_each_other(tmp_path):
     assert result["overlapping"] == 0
     assert result["inside"]
     assert result["first"] == {"x": 136, "y": 464}    # the best detection keeps the spot right above its box
+
+
+# ---------------------------------------------------------------- privacy notice
+
+def test_privacy_notice_under_the_upload_box(page):
+    notice = ("Your image is analysed and then discarded; it is not stored. Only the result "
+              "(defect type, confidence, timing) is saved, plus the standard request logs "
+              "(time, network address) that any web server keeps — never your image or its file name.")
+    assert notice in page
+    upload_box = page.index("Upload your own PCB image")
+    assert upload_box < page.index(notice) < page.index('id="samples-section"')
+
+
+@needs_node
+def test_page_uses_the_board_id_the_server_treats_as_demo(tmp_path):
+    assert run_js(tmp_path, "return BOARD_ID;") == main_module.DEMO_BOARD_ID

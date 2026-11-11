@@ -193,22 +193,28 @@ def list_inspections(
 
 @app.get("/analytics/summary", responses=DATABASE_DOWN)
 def get_analytics_summary(db: Session = Depends(get_db)):
+    # Visitors' uploads on /demo (board_id "demo") aren't real inspections, so they are left
+    # out of every number here; how many were left out is reported separately.
+    # (/inspections still lists every row, demo ones included.)
+    not_demo = Inspection.board_id != DEMO_BOARD_ID
+
     # 1. Get total inspections
-    total = db.query(Inspection).count()
-    
+    total = db.query(Inspection).filter(not_demo).count()
+
     # 2. Get average confidence across all runs
-    avg_conf = db.query(func.avg(Inspection.confidence)).scalar() or 0.0
-    
+    avg_conf = db.query(func.avg(Inspection.confidence)).filter(not_demo).scalar() or 0.0
+
     # 3. Get count breakdown by defect type
     breakdown = db.query(
-        Inspection.defect_type, 
+        Inspection.defect_type,
         func.count(Inspection.id)
-    ).group_by(Inspection.defect_type).all()
-    
+    ).filter(not_demo).group_by(Inspection.defect_type).all()
+
     return {
         "total_inspections": total,
         "average_confidence": round(avg_conf, 4),
-        "defect_breakdown": {row[0]: row[1] for row in breakdown}
+        "defect_breakdown": {row[0]: row[1] for row in breakdown},
+        "demo_inspections_excluded": db.query(Inspection).filter(Inspection.board_id == DEMO_BOARD_ID).count(),
     }
 
 @app.post("/inspect", responses={

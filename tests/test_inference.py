@@ -3,6 +3,7 @@
 These feed hand-made model outputs to the post-processing code, so they test our box
 maths and NMS exactly, independent of what the real model happens to predict.
 """
+import cv2
 import numpy as np
 import pytest
 
@@ -73,3 +74,51 @@ def test_nothing_above_threshold_gives_no_detections(model):
     outputs = fake_output([(300, 300, 20, 20, SHORT, 0.10)])  # below the 0.25 threshold
     assert model.detect(outputs) == []
     assert model.postprocess(outputs) == (None, 0.0)
+
+
+# ---------------------------------------------------------------- original-pixel boxes
+
+class FakeSession:
+    """Stands in for the ONNX session: always returns the same raw output."""
+    def __init__(self, outputs):
+        self.outputs = outputs
+
+    def run(self, _names, _inputs):
+        return self.outputs
+
+
+def encoded_image(width, height):
+    return cv2.imencode(".png", np.zeros((height, width, 3), np.uint8))[1].tobytes()
+
+
+def test_predict_scales_boxes_to_the_original_image(model, monkeypatch):
+    # In 640x640 model space: a box from (100, 200) to (200, 300), and a second one far away
+    outputs = fake_output([
+        (150, 250, 100, 100, SHORT, 0.90),
+        (500, 600, 40, 40, 0, 0.50),         # a second, lower-scoring box elsewhere
+    ])
+    monkeypatch.setattr(model, "session", FakeSession(outputs))
+
+    # A wide 1280x320 image: x is scaled by 2, y by 0.5
+    result = model.predict(encoded_image(1280, 320))
+
+    assert (result["image_width"], result["image_height"]) == (1280, 320)
+    assert result["detections"] == [
+        {"defect_type": "Short", "confidence": 0.9, "box": [200, 100, 400, 150]},
+        {"defect_type": "Open", "confidence": 0.5, "box": [960, 290, 1040, 310]},
+    ]
+    # The top defect is still reported the old way too
+    assert (result["defect_type"], result["confidence"]) == ("Short", 0.9)
+
+
+def test_boxes_are_clipped_to_the_image_edges():
+    # A box hanging off the top-left and bottom-right of a 640x640 image
+    assert PCBDefectModel.to_original_pixels([-10, -5, 700, 650], 640, 640) == [0, 0, 640, 640]
+
+
+def test_predict_with_no_detections(model, monkeypatch):
+    monkeypatch.setattr(model, "session", FakeSession(fake_output([])))
+    result = model.predict(encoded_image(100, 50))
+    assert result["detections"] == []
+    assert (result["defect_type"], result["confidence"]) == ("no_defect_detected", 0.0)
+    assert (result["image_width"], result["image_height"]) == (100, 50)

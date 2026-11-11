@@ -166,6 +166,9 @@ def inspect_pcb(
         defect_type = prediction_result["defect_type"]
         confidence_float = float(prediction_result["confidence"])
         processing_ms = int(prediction_result["processing_ms"])
+        detections = prediction_result["detections"]
+        image_width = int(prediction_result["image_width"])
+        image_height = int(prediction_result["image_height"])
     except ValueError:
         # predict() raises ValueError when OpenCV can't decode the image
         raise HTTPException(
@@ -186,21 +189,9 @@ def inspect_pcb(
         "confidence": confidence_float,
         "processing_ms": processing_ms,
     })
-    if not saved:
-        return {
-            "status": "partial_success",
-            "message": "Inference completed but database logging failed.",
-            "board_id": board_id,
-            "requires_human_review": requires_human_review,
-            "telemetry": {
-                "defect_type": defect_type,
-                "confidence": round(confidence_float, 4),
-                "processing_ms": processing_ms
-            }
-        }
-
-    # 6. Final Response (Standard Success)
-    return {
+    # 6. Response. "telemetry" is the top defect (what was saved); "detections" lists every
+    #    defect found, with boxes [x1, y1, x2, y2] in the ORIGINAL image's pixels.
+    response = {
         "status": "success",
         "board_id": board_id,
         "requires_human_review": requires_human_review,
@@ -208,5 +199,12 @@ def inspect_pcb(
             "defect_type": defect_type,
             "confidence": round(confidence_float, 4),
             "processing_ms": processing_ms
-        }
+        },
+        "detections": detections,
+        "image_width": image_width,
+        "image_height": image_height,
     }
+    if not saved:
+        response["status"] = "partial_success"
+        response["message"] = "Inference completed but database logging failed."
+    return response

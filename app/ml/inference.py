@@ -9,6 +9,8 @@ import onnxruntime as ort
 # not relative to the folder the app was started from, so it works from any directory.
 DEFAULT_MODEL_PATH = Path(__file__).resolve().parents[2] / "models" / "pcb_defect_v1.onnx"
 
+MODEL_SIZE = 640  # the model's input is MODEL_SIZE x MODEL_SIZE pixels
+
 
 class PCBDefectModel:
     def __init__(self, model_path=DEFAULT_MODEL_PATH):
@@ -28,15 +30,27 @@ class PCBDefectModel:
         self.input_name = self.session.get_inputs()[0].name
 
     def preprocess(self, image_bytes: bytes) -> np.ndarray:
-        # 1. Decode raw bytes into a BGR image array directly in memory
+        """Raw image bytes -> model input tensor [1, 3, 640, 640]."""
+        return self.to_tensor(self.decode(image_bytes))
+
+    @staticmethod
+    def decode(image_bytes: bytes) -> np.ndarray:
+        """Decode raw bytes into a BGR image array directly in memory.
+
+        Note: OpenCV applies a JPEG's EXIF orientation here, so the decoded width/height
+        can be swapped compared with the file header. Boxes must use THESE dimensions.
+        """
         nparr = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
         if img is None:
             raise ValueError("Could not decode image — file may be corrupted or not a valid image")
+        return img
 
+    @staticmethod
+    def to_tensor(img: np.ndarray) -> np.ndarray:
         # 2. Resize to standard YOLO dimension
-        img_resized = cv2.resize(img, (640, 640))
+        img_resized = cv2.resize(img, (MODEL_SIZE, MODEL_SIZE))
 
         # 3. Convert BGR to RGB
         img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
@@ -108,19 +122,48 @@ class PCBDefectModel:
         best_class_id, best_confidence, _ = detections[0]
         return self.defect_classes[best_class_id], best_confidence
 
+    @staticmethod
+    def to_original_pixels(box, width: int, height: int) -> list:
+        """A box [x1, y1, x2, y2] in the 640x640 model space -> whole pixels in the
+        original width x height image, clipped to the image edges."""
+        sx, sy = width / MODEL_SIZE, height / MODEL_SIZE
+        x1, y1, x2, y2 = box
+        return [
+            int(round(min(max(x1 * sx, 0), width))),
+            int(round(min(max(y1 * sy, 0), height))),
+            int(round(min(max(x2 * sx, 0), width))),
+            int(round(min(max(y2 * sy, 0), height))),
+        ]
+
     def predict(self, image_bytes: bytes) -> dict:
         start_time = time.perf_counter()
-        input_tensor = self.preprocess(image_bytes)   # raises ValueError if the image can't be decoded
-        outputs = self.session.run(None, {self.input_name: input_tensor})
-        predicted_defect, confidence = self.postprocess(outputs)
+        img = self.decode(image_bytes)                # raises ValueError if the image can't be decoded
+        height, width = img.shape[:2]
+        outputs = self.session.run(None, {self.input_name: self.to_tensor(img)})
 
-        if predicted_defect is None:
+        detections = [
+            {
+                "defect_type": self.defect_classes[class_id],
+                "confidence": round(confidence, 4),
+                "box": self.to_original_pixels(box, width, height),
+            }
+            for class_id, confidence, box in self.detect(outputs)
+        ]
+
+        # The top defect (highest confidence) is what telemetry and the database record
+        if detections:
+            predicted_defect = detections[0]["defect_type"]
+            confidence = detections[0]["confidence"]
+        else:
             predicted_defect = "no_defect_detected"
             confidence = 0.0
         end_time = time.perf_counter()
 
         return {
             "defect_type": predicted_defect,
-            "confidence": round(confidence, 4),
-            "processing_ms": int((end_time - start_time) * 1000)
+            "confidence": confidence,
+            "processing_ms": int((end_time - start_time) * 1000),
+            "detections": detections,
+            "image_width": width,
+            "image_height": height,
         }

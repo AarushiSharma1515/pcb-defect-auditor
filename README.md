@@ -182,16 +182,12 @@ Then open `http://127.0.0.1:8000/docs` for the interactive API.
 
 ## API
 
-**`GET /`** — health check
-```json
-{"status": "PCB Defect Auditor is running"}
-```
-
-**`GET /inspections`** — list all logged inspections
+Interactive documentation for every endpoint: `/docs`.
 
 **`POST /inspect`** — run an inspection
-- Form fields: `board_id` (string), `file` (image)
-- Response:
+- Form fields: `board_id` (string, at most 100 characters) and `file` (the image).
+- The image must be a JPEG or PNG (checked from the file's content, not its name or content type), at most 10 MB and 25 megapixels.
+- Response (a real result for one DeepPCB validation image, shortened to two detections):
 ```json
 {
   "status": "success",
@@ -199,13 +195,49 @@ Then open `http://127.0.0.1:8000/docs` for the interactive API.
   "requires_human_review": false,
   "telemetry": {
     "defect_type": "Copper",
-    "confidence": 0.9142,
-    "processing_ms": 4186
-  }
+    "confidence": 0.9376,
+    "processing_ms": 85
+  },
+  "detections": [
+    {"defect_type": "Copper", "confidence": 0.9376, "box": [213, 125, 255, 166]},
+    {"defect_type": "Short", "confidence": 0.8707, "box": [136, 484, 192, 520]}
+  ],
+  "image_width": 640,
+  "image_height": 640
 }
 ```
+- `detections` lists every defect found, best first. Each `box` is `[x1, y1, x2, y2]` in the **original** image's pixels, not the model's 640×640 input.
+- `telemetry` is the top defect. That is the one row saved to the database. With no detections it is `"no_defect_detected"` with confidence 0.
+- `requires_human_review` is `true` when the top confidence is below 0.5.
+- If the result couldn't be saved, `status` is `"partial_success"` and a `message` says so. The result itself is still valid.
+- Errors: `400` (empty file, not a JPEG/PNG, or a corrupted image), `413` (over 10 MB or 25 megapixels), `422` (a missing field, or `board_id` over 100 characters). Each has a plain-English `detail`.
+- `board_id` `"demo"` is reserved for the demo page. For those, the file name is not stored (`image_path` is saved as `"demo-upload"`), and they are left out of `/analytics/summary`.
 
----
+**`GET /health`** — always `200`. Says whether the model is loaded and the database answers a `SELECT 1` within 6 seconds.
+```json
+{"model_loaded": true, "model_file": "pcb_defect_v1.onnx", "mode": "onnx", "database": "ok", "version": "1.1.0"}
+```
+`database` is `"ok"` or `"unreachable"`.
+
+**`GET /demo`** — the browser demo page (see the top of this README).
+
+**`GET /inspections?limit=50&offset=0`** — logged inspections, newest first. `limit` is 1–200 (default 50); use `offset` for the next page.
+
+**`GET /analytics/summary`** — totals over all logged inspections except demo uploads.
+```json
+{"total_inspections": 24, "average_confidence": 0.9112, "defect_breakdown": {"Copper": 14, "Pin-hole": 9, "Spur": 1}, "demo_inspections_excluded": 3}
+```
+
+**`GET /samples`** — names of the demo images in `samples/`, e.g. `["1_open_01_PCB__1257.jpg"]`. An empty list if there are none. The repository and the deployed site ship none (see `samples/README.md`).
+
+**`GET /samples/{name}`** — one of those images. Only names that `/samples` lists are served (`404` otherwise, `400` for anything that looks like a path).
+
+**`GET /`** — a simple "is it running" check.
+```json
+{"status": "PCB Defect Auditor is running"}
+```
+
+`/inspections` and `/analytics/summary` answer `503` with a JSON `detail` while the database is unreachable. `/inspect` still works then, and returns `partial_success`.
 
 ---
 

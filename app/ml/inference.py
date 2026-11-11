@@ -52,11 +52,14 @@ class PCBDefectModel:
 
         return input_tensor
 
-    def postprocess(self, outputs, conf_threshold: float = 0.25, iou_threshold: float = 0.45):
+    def detect(self, outputs, conf_threshold: float = 0.25, iou_threshold: float = 0.45):
         """
-        Parses raw YOLOv8 ONNX output into a single best (defect_type, confidence) pair.
+        Parses raw YOLOv8 ONNX output into EVERY detection that survives NMS.
         Output shape from export: (1, num_classes + 4, num_anchors) -> e.g. (1, 10, 8400)
         First 4 rows are box coords (cx, cy, w, h); remaining rows are per-class scores.
+
+        Returns a list of (class_id, confidence, [x1, y1, x2, y2]) with the box in the
+        model's 640x640 input space, highest confidence first. Empty list if nothing found.
         """
         predictions = np.squeeze(outputs[0]).T  # -> (num_anchors, num_classes + 4)
 
@@ -71,28 +74,38 @@ class PCBDefectModel:
         boxes, class_ids, confidences = boxes[mask], class_ids[mask], confidences[mask]
 
         if len(boxes) == 0:
-            return None, 0.0
+            return []
 
-        # Convert center-format (cx, cy, w, h) to corner-format (x1, y1, x2, y2) for NMS
+        # Convert center-format (cx, cy, w, h) to corners (x1, y1, x2, y2)
         x1 = boxes[:, 0] - boxes[:, 2] / 2
         y1 = boxes[:, 1] - boxes[:, 3] / 2
         x2 = boxes[:, 0] + boxes[:, 2] / 2
         y2 = boxes[:, 1] + boxes[:, 3] / 2
-        nms_boxes = np.stack([x1, y1, x2, y2], axis=1)
 
+        # OpenCV's NMS expects each box as [x, y, width, height], NOT corners. Passing
+        # corners makes it read x2/y2 as a width/height, so every box looks far bigger
+        # than it is and neighbouring defects get merged into one.
+        nms_rects = np.stack([x1, y1, x2 - x1, y2 - y1], axis=1)
         indices = cv2.dnn.NMSBoxes(
-            nms_boxes.tolist(), confidences.tolist(), conf_threshold, iou_threshold
+            nms_rects.tolist(), confidences.tolist(), conf_threshold, iou_threshold
         )
 
-        if len(indices) == 0:
+        # The return shape varies by OpenCV version ((N,) or (N, 1)); flatten handles both.
+        # NMSBoxes returns indices sorted by score, highest first.
+        indices = np.array(indices, dtype=int).flatten()
+
+        return [
+            (int(class_ids[i]), float(confidences[i]),
+             [float(x1[i]), float(y1[i]), float(x2[i]), float(y2[i])])
+            for i in indices
+        ]
+
+    def postprocess(self, outputs, conf_threshold: float = 0.25, iou_threshold: float = 0.45):
+        """The single best (defect_type, confidence) pair, or (None, 0.0) if nothing was found."""
+        detections = self.detect(outputs, conf_threshold, iou_threshold)
+        if not detections:
             return None, 0.0
-
-        # cv2.dnn.NMSBoxes return shape varies by OpenCV version — handle both
-        best_idx = indices[0] if isinstance(indices[0], (int, np.integer)) else indices[0][0]
-
-        best_class_id = int(class_ids[best_idx])
-        best_confidence = float(confidences[best_idx])
-
+        best_class_id, best_confidence, _ = detections[0]
         return self.defect_classes[best_class_id], best_confidence
 
     def predict(self, image_bytes: bytes) -> dict:

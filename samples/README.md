@@ -1,18 +1,22 @@
 # Sample images
 
-One demo image per defect class, served by `GET /samples` and `GET /samples/{name}`.
-Chosen by `scripts/pick_samples.py` from the label files: the image with the fewest
-other defect types labelled in it.
+This folder is intentionally empty in the repo. `scripts/pick_samples.py` copies six
+images into it locally, for demos only. `.gitignore` and `.dockerignore` exclude
+`samples/*.jpg`, `samples/*.jpeg` and `samples/*.png`, so images copied here are not
+committed and not put in the Docker image.
 
-**Source:** DeepPCB dataset, validation split (`data/DeepPCB/valid`) of the Kaggle repackaging `liuxiaolong1/pcb-defect-detection-dataset` that this model was evaluated on. Original dataset: https://github.com/tangsanli5201/DeepPCB
+To fill it, run this from the repo root:
 
-**Licence:** DeepPCB dataset, taken from the Kaggle repackaging pcb-defect-detection-dataset by liuxiaolong1, listed on Kaggle as CC0: Public Domain. Six validation-split images are included for demonstration only.
+```
+python scripts/pick_samples.py --dry-run   # see which images it would pick
+python scripts/pick_samples.py             # copy them here
+```
 
-| Sample | Class | Original file | Labelled defects in the image |
-|---|---|---|---|
-| `1_open_01_PCB__1257.jpg` | Open | `01_PCB__1257.jpg` | 1 Open, 2 Mousebite |
-| `2_short_01_PCB__1003.jpg` | Short | `01_PCB__1003.jpg` | 1 Open, 3 Short, 1 Spur |
-| `3_mousebite_01_PCB__1304.jpg` | Mousebite | `01_PCB__1304.jpg` | 2 Mousebite, 1 Copper, 1 Pin-hole |
-| `4_spur_01_PCB__1484.jpg` | Spur | `01_PCB__1484.jpg` | 1 Open, 1 Short, 2 Spur |
-| `5_copper_01_PCB__399.jpg` | Copper | `01_PCB__399.jpg` | 1 Open, 1 Short, 1 Copper |
-| `6_pin-hole_01_PCB__626.jpg` | Pin-hole | `01_PCB__626.jpg` | 2 Spur, 2 Pin-hole |
+It copies six images from `data/DeepPCB/valid/images` into this folder, one per defect
+class (Open, Short, Mousebite, Spur, Copper, Pin-hole), chosen from the label files.
+`GET /samples` then lists them and `GET /samples/{name}` serves them. The copies stay
+on your machine.
+
+## Dataset credit
+
+Trained and evaluated on the DeepPCB dataset (https://github.com/tangsanli5201/DeepPCB), associated with the paper 'On-line PCB Defect Detector On A New PCB Defect Dataset', using the Kaggle repackaging 'pcb-defect-detection-dataset' by liuxiaolong1. The DeepPCB repository states that the dataset may only be used for research purposes; this project is a non-commercial portfolio demonstration. The current version of this repository contains no dataset images.

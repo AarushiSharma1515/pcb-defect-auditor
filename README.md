@@ -134,6 +134,8 @@ pcb-defect-auditor/
 
 ## A note on the dataset
 
+Trained and evaluated on the DeepPCB dataset (https://github.com/tangsanli5201/DeepPCB), associated with the paper 'On-line PCB Defect Detector On A New PCB Defect Dataset', using the Kaggle repackaging 'pcb-defect-detection-dataset' by liuxiaolong1. The DeepPCB repository states that the dataset may only be used for research purposes; this project is a non-commercial portfolio demonstration. The current version of this repository contains no dataset images.
+
 Getting to a working model took two failed attempts before this one worked, and that's worth leaving in rather than pretending it was smooth:
 
 1. **First attempt** used a Roboflow-hosted export of PKU-Market-PCB. The `data.yaml` class names had somehow been replaced with Roboflow's own boilerplate text instead of real defect labels — only caught after 50 epochs of training produced mAP50 near zero, then visually checking a labeled image against its actual annotations.

@@ -1,6 +1,12 @@
 """
 Copy ONE demo image per defect class from the DeepPCB validation split into samples/,
-and write samples/README.md saying where they came from. GET /samples then serves them.
+for a LOCAL demo. GET /samples then serves them.
+
+The copies never leave your machine: .gitignore and .dockerignore exclude samples/*.jpg,
+*.jpeg and *.png, because the DeepPCB repository states the dataset may only be used for
+research purposes, and the current version of this repository contains no dataset images. The script also
+(re)writes samples/README.md, which IS tracked; its text is fixed, so re-running the
+script never changes it. Which images were picked is printed, not written to the README.
 
 How an image is chosen for each class (using the label files, not the model):
   1. its label file contains at least one box of that class
@@ -12,8 +18,8 @@ Each class gets a different image. If any class can't be filled, nothing is copi
 Label files are raw DeepPCB format, one box per line:  x1 y1 x2 y2 type   (type 1-6).
 
 Usage (from the repo root):
-    python scripts/pick_samples.py --dry-run                 # show the choices, copy nothing
-    python scripts/pick_samples.py --licence "<licence line>"
+    python scripts/pick_samples.py --dry-run     # show the choices, copy nothing
+    python scripts/pick_samples.py
 """
 import argparse
 import shutil
@@ -30,14 +36,38 @@ DEFAULT_SRC = REPO_ROOT / "data" / "DeepPCB" / "valid"
 DEFAULT_DEST = REPO_ROOT / "samples"
 IMAGE_EXTENSIONS = (".jpg", ".png")
 
-SOURCE_LINE = (
-    "DeepPCB dataset, validation split (`data/DeepPCB/valid`) of the Kaggle repackaging "
-    "`liuxiaolong1/pcb-defect-detection-dataset` that this model was evaluated on. "
-    "Original dataset: https://github.com/tangsanli5201/DeepPCB"
+CREDIT_LINE = (
+    "Trained and evaluated on the DeepPCB dataset (https://github.com/tangsanli5201/DeepPCB), "
+    "associated with the paper 'On-line PCB Defect Detector On A New PCB Defect Dataset', "
+    "using the Kaggle repackaging 'pcb-defect-detection-dataset' by liuxiaolong1. "
+    'The DeepPCB repository states that the dataset may only be used for research purposes; '
+    'this project is a non-commercial portfolio demonstration. '
+    'The current version of this repository contains no dataset images.'
 )
-# Paste the dataset's licence line here, or pass it with --licence "...".
-LICENCE_PLACEHOLDER = "<PASTE THE LICENCE LINE HERE>"
-LICENCE_LINE = LICENCE_PLACEHOLDER
+
+README_TEXT = f"""# Sample images
+
+This folder is intentionally empty in the repo. `scripts/pick_samples.py` copies six
+images into it locally, for demos only. `.gitignore` and `.dockerignore` exclude
+`samples/*.jpg`, `samples/*.jpeg` and `samples/*.png`, so images copied here are not
+committed and not put in the Docker image.
+
+To fill it, run this from the repo root:
+
+```
+python scripts/pick_samples.py --dry-run   # see which images it would pick
+python scripts/pick_samples.py             # copy them here
+```
+
+It copies six images from `data/DeepPCB/valid/images` into this folder, one per defect
+class (Open, Short, Mousebite, Spur, Copper, Pin-hole), chosen from the label files.
+`GET /samples` then lists them and `GET /samples/{{name}}` serves them. The copies stay
+on your machine.
+
+## Dataset credit
+
+{CREDIT_LINE}
+"""
 
 
 def read_label_types(path: Path) -> Counter:
@@ -98,30 +128,16 @@ def describe(counts: Counter) -> str:
     return ", ".join(f"{counts[t]} {DEFECT_CLASSES[t - 1]}" for t in sorted(counts))
 
 
-def write_readme(dest: Path, chosen, licence: str):
-    rows = "\n".join(
-        f"| `{sample_name(t, image)}` | {DEFECT_CLASSES[t - 1]} | `{image.name}` | {describe(counts)} |"
-        for t, image, counts in chosen
-    )
-    (dest / "README.md").write_text(
-        "# Sample images\n\n"
-        "One demo image per defect class, served by `GET /samples` and `GET /samples/{name}`.\n"
-        "Chosen by `scripts/pick_samples.py` from the label files: the image with the fewest\n"
-        "other defect types labelled in it.\n\n"
-        f"**Source:** {SOURCE_LINE}\n\n"
-        f"**Licence:** {licence}\n\n"
-        "| Sample | Class | Original file | Labelled defects in the image |\n"
-        "|---|---|---|---|\n"
-        f"{rows}\n",
-        encoding="utf-8",
-    )
+def write_readme(dest: Path):
+    # newline="\n" so the file is byte-for-byte the same on Windows and Linux
+    with open(dest / "README.md", "w", encoding="utf-8", newline="\n") as f:
+        f.write(README_TEXT)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--src", type=Path, default=DEFAULT_SRC, help="split folder with images/ and labels/")
     parser.add_argument("--dest", type=Path, default=DEFAULT_DEST, help="where to copy the samples")
-    parser.add_argument("--licence", default=LICENCE_LINE, help="licence line for samples/README.md")
     parser.add_argument("--dry-run", action="store_true", help="print the choices, copy nothing")
     args = parser.parse_args(argv)
 
@@ -135,11 +151,8 @@ def main(argv=None):
     args.dest.mkdir(parents=True, exist_ok=True)
     for t, image, _ in chosen:
         shutil.copy2(image, args.dest / sample_name(t, image))
-    write_readme(args.dest, chosen, args.licence)
-    print(f"Copied {len(chosen)} images and wrote {args.dest / 'README.md'}")
-    if args.licence == LICENCE_PLACEHOLDER:
-        print("WARNING: the licence line is still a placeholder. Edit samples/README.md, "
-              "or re-run with --licence \"...\".")
+    write_readme(args.dest)
+    print(f"Copied {len(chosen)} images into {args.dest} (ignored by git and Docker; keep them local).")
     return 0
 
 

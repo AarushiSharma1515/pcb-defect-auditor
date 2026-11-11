@@ -76,7 +76,7 @@ The model detects six PCB fabrication defects, trained on the DeepPCB dataset:
 
 Trained YOLOv8n for 99 epochs on DeepPCB (early-stopped from a 100-epoch budget, patience=20, best weights from epoch 79). Full training run: `notebooks/train_pcb_model.ipynb`.
 
-**Overall (validation set, 150 images, 984 instances):**
+**Overall (test split, 150 images, 984 instances; the same split chose the best epoch, see [A note on the dataset](#a-note-on-the-dataset)):**
 
 | Metric | Value |
 |---|---|
@@ -124,7 +124,7 @@ pcb-defect-auditor/
 ├── notebooks/                # Full training notebook
 ├── samples/                  # Demo images, local only (README.md explains)
 ├── scripts/
-│   ├── convert_labels.py     # Fixes a labeling issue found in the raw dataset
+│   ├── convert_labels.py     # Converts DeepPCB labels to YOLO format
 │   ├── evaluate.py           # Precision/recall/mAP of the ONNX model on DeepPCB splits
 │   ├── benchmark.py          # CPU inference speed of the ONNX model
 │   └── pick_samples.py       # Copies one validation image per class into samples/
@@ -145,13 +145,19 @@ pcb-defect-auditor/
 
 Trained and evaluated on the DeepPCB dataset (https://github.com/tangsanli5201/DeepPCB), associated with the paper 'On-line PCB Defect Detector On A New PCB Defect Dataset', using the Kaggle repackaging 'pcb-defect-detection-dataset' by liuxiaolong1. The DeepPCB repository states that the dataset may only be used for research purposes; this project is a non-commercial portfolio demonstration. The current version of this repository contains no dataset images.
 
-Getting to a working model took two failed attempts before this one worked, and that's worth leaving in rather than pretending it was smooth:
+How it got there (all of it is in `notebooks/train_pcb_model.ipynb`):
 
-1. **First attempt** used a Roboflow-hosted export of PKU-Market-PCB. The `data.yaml` class names had somehow been replaced with Roboflow's own boilerplate text instead of real defect labels — only caught after 50 epochs of training produced mAP50 near zero, then visually checking a labeled image against its actual annotations.
-2. **Second attempt** with DeepPCB initially failed with "no labels found" — the raw download didn't include YOLO-format annotations at all.
-3. **Third attempt**, using a properly YOLO-formatted DeepPCB export, is the one that actually worked — the results above are from that run.
+1. **PKU-Market-PCB through Roboflow, dropped.** The first run (50 epochs) used a Roboflow export of PKU-Market-PCB whose `data.yaml` had placeholder class names (Roboflow's own boilerplate text) instead of defect names. Per-class mAP50 came out between about 0.07 and 0.2. After the names were corrected, a second run was started but stopped before it finished, so no final results were saved for it. This dataset was then dropped.
+2. **DeepPCB from the Kaggle repackaging, used for the model here.** Its labels are corner coordinates with class numbers 1–6, not YOLO format, so the first DeepPCB training attempts found no usable labels. `scripts/convert_labels.py` (the same code as the notebook cell) converts them to YOLO format. Training then worked, and the results in [Evaluation](#evaluation) are from that run.
 
-`scripts/convert_labels.py` documents the fix. The broader lesson: a model can train "successfully" — loss decreasing, no errors — against completely wrong labels, and only a direct visual check against ground truth reveals it.
+What that means for the numbers:
+
+- **This is the Kaggle copy, not the official split.** It splits the boards 1,200 / 150 / 150 (train / valid / test). The official DeepPCB release splits 1,000 / 500.
+- **The test split also chose the best epoch.** Training used the 150-image test split as its validation set, so the test scores are a little optimistic. The 150-image `valid` split was not used during training; its scores are in `docs/evaluation.md`.
+- **The defects are artificial.** The DeepPCB authors added the defects to images of real boards; they are not defects from a production line.
+- **Not comparable with the DeepPCB paper.** The mAP here counts a detection as correct at IoU 0.5; the DeepPCB paper uses 0.33. The scores can't be compared with theirs.
+
+The broader lesson from the first attempt: a model can train "successfully" (loss going down, no errors) against completely wrong labels, and only checking labelled images against the ground truth by eye shows it.
 
 ---
 

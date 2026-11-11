@@ -24,6 +24,9 @@ HEALTH_DB_TIMEOUT_SECONDS = 2.0       # /health reports "unreachable" if SELECT 
 SAMPLES_DIR = Path(__file__).resolve().parents[1] / "samples"
 SAMPLE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 
+# The browser demo: one self-contained HTML file (inline CSS and JS, nothing external)
+DEMO_PAGE = Path(__file__).resolve().parent / "static" / "demo.html"
+
 logger = logging.getLogger(__name__)
 
 ml_engine = {}
@@ -151,6 +154,11 @@ def get_sample(name: str):
     if path is None:
         raise HTTPException(status_code=404, detail=f"No sample image named '{name}'.")
     return FileResponse(path)
+
+
+@app.get("/demo", include_in_schema=False)   # a web page, not an API endpoint, so not in /docs
+def demo_page():
+    return FileResponse(DEMO_PAGE, media_type="text/html")
 
 @app.exception_handler(OperationalError)
 async def database_unavailable(request: Request, exc: OperationalError):

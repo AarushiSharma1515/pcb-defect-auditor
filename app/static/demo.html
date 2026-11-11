@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PCB Defect Auditor Demo</title>
+<style>
+  /* One self-contained page: no frameworks, no CDN, no external fonts or images. */
+  :root {
+    --bg: #f6f7f9;
+    --card: #ffffff;
+    --text: #1b1f24;
+    --muted: #5b6470;
+    --border: #d9dee5;
+    --accent: #0b6bcb;
+    --ok: #1a7f37;
+    --warn-bg: #fff4d6;
+    --warn-text: #6b4d00;
+    --error-bg: #fde7e9;
+    --error-text: #8c1d24;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1216;
+      --card: #181c22;
+      --text: #e6e9ee;
+      --muted: #9aa4b2;
+      --border: #2c333d;
+      --accent: #5aa9ff;
+      --ok: #4ac26b;
+      --warn-bg: #3a2f10;
+      --warn-text: #f5d77a;
+      --error-bg: #3d1a1e;
+      --error-text: #ffb3ba;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main {
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 24px 16px 32px;   /* 16px side gutter on phones */
+  }
+  h1 { font-size: 1.6rem; line-height: 1.25; margin: 0 0 8px; }
+  h2 { font-size: 1.15rem; margin: 0 0 12px; }
+  p { margin: 0 0 12px; }
+  a { color: var(--accent); }
+  .intro { color: var(--muted); }
+  .links { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 0; padding: 0; list-style: none; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin: 16px 0;
+  }
+  footer {
+    color: var(--muted);
+    font-size: 0.875rem;
+    border-top: 1px solid var(--border);
+    margin-top: 24px;
+    padding-top: 12px;
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>PCB Defect Auditor</h1>
+    <p class="intro">
+      Upload a photo of a bare printed circuit board and a YOLOv8 model finds and outlines
+      six kinds of manufacturing defect: open, short, mousebite, spur, spurious copper and pin-hole.
+    </p>
+    <ul class="links">
+      <li><a href="/docs">API documentation (/docs)</a></li>
+      <li><a href="https://github.com/AarushiSharma1515/pcb-defect-auditor">Source code on GitHub</a></li>
+    </ul>
+  </header>
+
+  <footer>
+    Trained on DeepPCB (Kaggle repackaging, 1,200/150/150 split). Not validated on real factory images.
+  </footer>
+</main>
+</body>
+</html>

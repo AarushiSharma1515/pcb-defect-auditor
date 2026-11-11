@@ -3,7 +3,7 @@
 **Try it in your browser:** [https://pcb-defect-auditor.onrender.com/demo](https://pcb-defect-auditor.onrender.com/demo). Upload a JPEG or PNG of a bare PCB and every detected defect is outlined on the image, with a results table. It works on phones.
 
 **Live API:** [https://pcb-defect-auditor.onrender.com/docs](https://pcb-defect-auditor.onrender.com/docs)
-*(Speed: on a laptop CPU (Intel i7-1260P) one image takes 47 ms on average end to end: decoding, preprocessing, the model and NMS, not counting network or database time; see [docs/benchmark.md](docs/benchmark.md). The live site runs on Render's free tier, which has far less CPU, so a request there can take several seconds, especially right after the server wakes from sleep.)*
+*(Speed: on a laptop CPU (Intel i7-1260P) one image takes 47 ms on average end to end: decoding, preprocessing, the model and NMS, not counting network or database time; see [Benchmark](#benchmark). The live site runs on Render's free tier, which has far less CPU, so a request there can take several seconds, especially right after the server wakes from sleep.)*
 
 An automated optical inspection API for printed circuit boards. A YOLOv8 model, exported to ONNX and served through FastAPI, detects and classifies PCB defects and logs every inspection to a Postgres database (Neon) for later analysis.
 
@@ -68,7 +68,7 @@ The model detects six PCB fabrication defects, trained on the DeepPCB dataset:
 - **Out-of-distribution inputs can produce confident false positives.** The model was trained strictly on the DeepPCB distribution and has no "not a PCB" class — feeding it an unrelated image doesn't reliably get rejected. Tested directly: an unrelated non-PCB image returned `"Spur"` at 0.44 confidence rather than a clear rejection.
 - **No background/negative class.** There's no dedicated category for "this isn't a defect" — every confident detection gets forced into one of the six known classes.
 - **Content-type validation works correctly for non-image files.** A `.pdf` sent to `/inspect` was correctly rejected with a `400`, confirmed directly against the live deployment.
-- **Slow on the free tier, especially after a sleep.** Render's free tier puts the service to sleep when it isn't used, and the first request has to wake it up. Even when it is awake, its small CPU means a request can take several seconds, much more than the 47 ms per image measured on a laptop (see [docs/benchmark.md](docs/benchmark.md)).
+- **Slow on the free tier, especially after a sleep.** Render's free tier puts the service to sleep when it isn't used, and the first request has to wake it up. Even when it is awake, its small CPU means a request can take several seconds, much more than the 47 ms per image measured on a laptop (see [Benchmark](#benchmark)).
 
 ---
 
@@ -103,6 +103,19 @@ Full numbers and raw per-epoch log: `docs/training_results/metrics.md` and `resu
 ![Confusion Matrix](docs/training_results/confusion_matrix_normalized.png)
 
 The diagonal is strong across every class (0.92–0.99) — the model isn't confusing defect types with each other. The real weak spot is the background column: Mousebite (0.30) and Open (0.27) are the two classes most often triggered by substrate edges or normal board texture that isn't actually a defect. That's a background-vs-defect problem, not a defect-vs-defect problem.
+
+---
+
+## Benchmark
+
+CPU speed of the ONNX model, one image at a time, over 50 DeepPCB test images. Full method and numbers: [docs/benchmark.md](docs/benchmark.md).
+
+| Measurement | Mean | Throughput |
+|---|---|---|
+| End to end (decode, preprocess, model, NMS) | 47.2 ms | 21.2 images/s |
+| Model only | 36.6 ms | 27.3 images/s |
+
+These were measured on a laptop CPU (12th Gen Intel i7-1260P) and don't include network or database time. The live site's free-tier CPU is much slower.
 
 ---
 

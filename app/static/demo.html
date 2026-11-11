@@ -141,6 +141,36 @@
   .busy { display: flex; align-items: center; gap: 10px; color: var(--muted); }
   .busy .spinner { margin-top: 0; }
 
+  /* Result: image with boxes, then the table */
+  canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+    border-radius: 8px;
+    background: #000;
+  }
+  .table-wrap { overflow-x: auto; margin: 12px 0; }   /* the table scrolls, not the page */
+  table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; white-space: normal; vertical-align: bottom; }
+  @media (max-width: 480px) {
+    .card { padding: 12px; }
+    table { font-size: 0.82rem; }
+    th, td { padding: 6px 5px; }
+  }
+  td.num { font-variant-numeric: tabular-nums; }
+  .swatch {
+    display: inline-block;
+    width: 12px; height: 12px;
+    border-radius: 3px;
+    margin-right: 6px;
+    vertical-align: -1px;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+  }
+  .facts { list-style: none; padding: 0; margin: 12px 0 0; }
+  .facts li { margin: 2px 0; }
+  .facts strong { font-weight: 600; }
+
   footer {
     color: var(--muted);
     font-size: 0.875rem;
@@ -200,7 +230,21 @@
     <p class="message error" id="inspect-error" role="alert" hidden></p>
     <p class="message warning" id="partial-notice" hidden>Result is valid; saving it to the database failed.</p>
     <div id="result-body" hidden>
-      <p id="result-summary"></p>
+      <canvas id="result-canvas" role="img" aria-label="The inspected image with a box around each detected defect"></canvas>
+      <p id="no-detections" hidden><strong>No defects detected</strong></p>
+      <div class="table-wrap" id="detections-wrap">
+        <table>
+          <thead>
+            <tr><th>Defect</th><th>Confidence</th><th>Box [x1, y1, x2, y2] (px)</th></tr>
+          </thead>
+          <tbody id="detections-rows"></tbody>
+        </table>
+      </div>
+      <ul class="facts">
+        <li><strong>Processing time:</strong> <span id="fact-time"></span></li>
+        <li><strong>Needs human review:</strong> <span id="fact-review"></span></li>
+        <li><strong>Image size:</strong> <span id="fact-size"></span></li>
+      </ul>
     </div>
   </section>
 
@@ -220,6 +264,18 @@ const WAKING_MESSAGE =
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;   // same limit as the server (app/main.py)
 const INSPECT_TIMEOUT_MS = 90000;            // the first inspection after waking can be slow
 const BOARD_ID = "demo";
+const MAX_CANVAS_SIDE = 2048;   // phone browsers refuse very large canvases
+
+// One colour per defect type (the model's class names). Also used in the table.
+const DEFECT_COLOURS = {
+  "Open": "#e6194b",       // red
+  "Short": "#f58231",      // orange
+  "Mousebite": "#ffe119",  // yellow
+  "Spur": "#3cb44b",       // green
+  "Copper": "#42d4f4",     // cyan
+  "Pin-hole": "#f032e6",   // magenta
+};
+const UNKNOWN_COLOUR = "#a9a9a9";
 
 // ---------------------------------------------------------------- pure helpers
 // (No page access in here, so tests can run them in Node.)
@@ -293,6 +349,98 @@ function errorMessage(status, body) {
     default:
       return "Something went wrong (HTTP " + status + "). Please try again.";
   }
+}
+
+// ---- drawing helpers
+
+function colourFor(defectType) {
+  return Object.prototype.hasOwnProperty.call(DEFECT_COLOURS, defectType)
+    ? DEFECT_COLOURS[defectType] : UNKNOWN_COLOUR;
+}
+
+/** WCAG relative luminance of a "#rrggbb" colour. */
+function luminance(hex) {
+  const channel = (i) => {
+    const c = parseInt(hex.slice(i, i + 2), 16) / 255;
+    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5);
+}
+
+function contrastRatio(hexA, hexB) {
+  const [a, b] = [luminance(hexA), luminance(hexB)].sort((x, y) => y - x);
+  return (a + 0.05) / (b + 0.05);
+}
+
+/** Black or white label text, whichever is easier to read on this background. */
+function textColourOn(hex) {
+  return contrastRatio(hex, "#000000") >= contrastRatio(hex, "#ffffff") ? "#000000" : "#ffffff";
+}
+
+/** Canvas size for an image: its own size, shrunk so the longest side is at most maxSide. */
+function canvasSize(width, height, maxSide = MAX_CANVAS_SIDE) {
+  const scale = Math.min(1, maxSide / Math.max(width, height));
+  return { width: Math.round(width * scale), height: Math.round(height * scale) };
+}
+
+/**
+ * A box [x1, y1, x2, y2] in ORIGINAL image pixels (imageWidth x imageHeight, as the server
+ * reports them) -> {x, y, w, h} on a canvas of canvasWidth x canvasHeight.
+ */
+function scaleBox(box, imageWidth, imageHeight, canvasWidth, canvasHeight) {
+  const sx = canvasWidth / imageWidth;
+  const sy = canvasHeight / imageHeight;
+  const [x1, y1, x2, y2] = box;
+  return { x: x1 * sx, y: y1 * sy, w: (x2 - x1) * sx, h: (y2 - y1) * sy };
+}
+
+/** Where a label of labelW x labelH goes for a box: just above it, or inside its top if there's
+ *  no room above; always kept inside the canvas. */
+function placeLabel(box, labelW, labelH, canvasWidth, canvasHeight) {
+  const x = Math.max(0, Math.min(box.x, canvasWidth - labelW));
+  const above = box.y - labelH;
+  const y = above >= 0 ? above : Math.max(0, Math.min(box.y, canvasHeight - labelH));
+  return { x, y };
+}
+
+function overlaps(a, b) {
+  return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+}
+
+/**
+ * Positions for every label, so labels don't cover each other where defects are close together.
+ * items: [{box, w, h}] with the most important first (it gets the best spot). For each label,
+ * try: above the box, below it, inside its top, then further up or down; take the first spot
+ * that doesn't overlap a label already placed (or "above" if nothing is free).
+ */
+function layoutLabels(items, canvasWidth, canvasHeight) {
+  const placed = [];
+  return items.map(({ box, w, h }) => {
+    const clampX = Math.max(0, Math.min(box.x, canvasWidth - w));
+    const clampY = (y) => Math.max(0, Math.min(y, canvasHeight - h));
+    const above = placeLabel(box, w, h, canvasWidth, canvasHeight);
+    const candidates = [above, { x: clampX, y: clampY(box.y + box.h) }, { x: clampX, y: clampY(box.y) }];
+    for (let k = 1; k <= 6; k++) {
+      candidates.push({ x: clampX, y: clampY(box.y - h * (k + 1)) });
+      candidates.push({ x: clampX, y: clampY(box.y + box.h + h * k) });
+    }
+    const free = candidates.find((c) => !placed.some((p) => overlaps({ x: c.x, y: c.y, w, h }, p)));
+    const spot = free || above;
+    placed.push({ x: spot.x, y: spot.y, w, h });
+    return spot;
+  });
+}
+
+function formatPercent(confidence, decimals) {
+  return (confidence * 100).toFixed(decimals) + "%";
+}
+
+function labelText(detection) {
+  return detection.defect_type + " " + formatPercent(detection.confidence, 0);
+}
+
+function formatBox(box) {
+  return "[" + box.map((v) => Math.round(v)).join(", ") + "]";
 }
 
 /**
@@ -464,7 +612,9 @@ function startPage() {
   // ---- inspecting and showing the result
   const results = {
     box: $("results"), busy: $("busy"), error: $("inspect-error"),
-    partial: $("partial-notice"), body: $("result-body"), summary: $("result-summary"),
+    partial: $("partial-notice"), body: $("result-body"), canvas: $("result-canvas"),
+    none: $("no-detections"), tableWrap: $("detections-wrap"), rows: $("detections-rows"),
+    time: $("fact-time"), review: $("fact-review"), size: $("fact-size"),
   };
   let busy = false;
 
@@ -505,14 +655,118 @@ function startPage() {
     }
   }
 
+  let lastDrawing = null;   // {image, result}, so the boxes can be redrawn when the screen resizes
+
   async function showResult(result, blob) {
     results.partial.hidden = result.status !== "partial_success";
     const detections = Array.isArray(result.detections) ? result.detections : [];
-    results.summary.textContent = detections.length
-      ? "Found " + detections.length + " defect" + (detections.length === 1 ? "" : "s") + "."
-      : "No defects detected";
+
+    // Table (built with textContent, never innerHTML)
+    results.rows.replaceChildren();
+    detections.forEach((det) => {
+      const row = document.createElement("tr");
+      const cells = [det.defect_type, formatPercent(det.confidence, 1), formatBox(det.box)];
+      cells.forEach((text, col) => {
+        const td = document.createElement("td");
+        if (col === 0) {
+          const swatch = document.createElement("span");
+          swatch.className = "swatch";
+          swatch.style.background = colourFor(det.defect_type);
+          td.append(swatch);
+        } else {
+          td.className = "num";
+        }
+        td.append(document.createTextNode(text));
+        row.append(td);
+      });
+      results.rows.append(row);
+    });
+    results.none.hidden = detections.length > 0;
+    results.tableWrap.hidden = detections.length === 0;
+
+    const telemetry = result.telemetry || {};
+    results.time.textContent = Number.isFinite(telemetry.processing_ms) ? telemetry.processing_ms + " ms" : "unknown";
+    results.review.textContent = result.requires_human_review
+      ? "Yes (the model's top confidence is below 50%)"
+      : "No";
+    results.size.textContent = result.image_width && result.image_height
+      ? result.image_width + " × " + result.image_height + " px" : "unknown";
+
+    // Image with boxes. The body must be visible first so the canvas has a display size.
     results.body.hidden = false;
+    const url = URL.createObjectURL(blob);
+    try {
+      const image = new Image();
+      image.src = url;
+      await image.decode();
+      lastDrawing = { image, result: Object.assign({}, result, { detections }) };
+      draw();
+    } catch (error) {
+      lastDrawing = null;
+      results.canvas.hidden = true;   // the table above still shows every result
+      return;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
   }
+
+  function draw() {
+    if (!lastDrawing) return;
+    const { image, result } = lastDrawing;
+    const canvas = results.canvas;
+    canvas.hidden = false;
+    const size = canvasSize(image.naturalWidth, image.naturalHeight);
+    canvas.width = size.width;
+    canvas.height = size.height;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(image, 0, 0, size.width, size.height);
+
+    // Canvas pixels per screen pixel, so lines and text look the same size on any screen
+    const perScreenPx = size.width / Math.max(1, canvas.getBoundingClientRect().width);
+    const lineWidth = 2 * perScreenPx;
+    const fontPx = 13 * perScreenPx;
+    const padding = 3 * perScreenPx;
+    ctx.font = "600 " + fontPx + "px system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
+    ctx.textBaseline = "top";
+
+    const imageWidth = result.image_width || image.naturalWidth;
+    const imageHeight = result.image_height || image.naturalHeight;
+    // Detections arrive best first; that order also decides who gets the best label spot
+    const items = result.detections.map((det) => {
+      const text = labelText(det);
+      return {
+        det, text, colour: colourFor(det.defect_type),
+        box: scaleBox(det.box, imageWidth, imageHeight, size.width, size.height),
+        w: ctx.measureText(text).width + padding * 2,
+        h: fontPx + padding * 2,
+      };
+    });
+    const spots = layoutLabels(items, size.width, size.height);
+
+    // 1. All boxes: a dark outline first (visible on light boards), then the colour
+    for (const { box, colour } of items) {
+      ctx.lineWidth = lineWidth * 2;
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.7)";
+      ctx.strokeRect(box.x, box.y, box.w, box.h);
+      ctx.lineWidth = lineWidth;
+      ctx.strokeStyle = colour;
+      ctx.strokeRect(box.x, box.y, box.w, box.h);
+    }
+    // 2. All labels on top of the boxes; best last, so it wins if two still overlap
+    for (let i = items.length - 1; i >= 0; i--) {
+      const { text, colour, w, h } = items[i];
+      ctx.fillStyle = colour;
+      ctx.fillRect(spots[i].x, spots[i].y, w, h);
+      ctx.fillStyle = textColourOn(colour);
+      ctx.fillText(text, spots[i].x + padding, spots[i].y + padding);
+    }
+  }
+
+  let resizeTimer = null;
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(draw, 150);
+  });
 
   status.retry.addEventListener("click", checkServer);
   checkServer();

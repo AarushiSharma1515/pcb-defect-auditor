@@ -265,3 +265,94 @@ def test_server_error_details_used_by_the_page_are_plain_english(tmp_path):
     assert response.status_code == 400
     assert isinstance(response.json()["detail"], str)
     assert response.json()["detail"].endswith(".")
+
+
+# ---------------------------------------------------------------- step: canvas and table
+
+@needs_node
+def test_boxes_are_scaled_with_image_width_and_height(tmp_path):
+    # A 1280x320 image drawn on a 640x160 canvas: everything halves
+    box = run_js(tmp_path, "return scaleBox([200, 100, 400, 150], 1280, 320, 640, 160);")
+    assert box == {"x": 100, "y": 50, "w": 100, "h": 25}
+
+
+@needs_node
+def test_big_images_are_drawn_at_most_2048_px(tmp_path):
+    assert run_js(tmp_path, "return canvasSize(5000, 4000);") == {"width": 2048, "height": 1638}
+    assert run_js(tmp_path, "return canvasSize(640, 640);") == {"width": 640, "height": 640}
+
+
+@needs_node
+def test_every_defect_type_has_its_own_colour(tmp_path):
+    from app.ml.inference import DEFECT_CLASSES
+    colours = run_js(tmp_path, f"return {json.dumps(DEFECT_CLASSES)}.map(colourFor);")
+    assert len(set(colours)) == len(DEFECT_CLASSES) == 6
+    assert "#a9a9a9" not in colours                         # none falls back to "unknown" grey
+    assert run_js(tmp_path, 'return colourFor("something new");') == "#a9a9a9"
+
+
+@needs_node
+def test_labels_are_readable_on_their_colour(tmp_path):
+    # WCAG AA asks for a contrast of at least 4.5 : 1 for normal text
+    ratios = run_js(tmp_path, """
+        return Object.values(DEFECT_COLOURS).concat([UNKNOWN_COLOUR])
+          .map((c) => contrastRatio(c, textColourOn(c)));
+    """)
+    assert min(ratios) >= 4.5, ratios
+
+
+@needs_node
+def test_labels_stay_inside_the_canvas(tmp_path):
+    placed = run_js(tmp_path, """
+        return {
+          normal:   placeLabel({x: 100, y: 100, w: 50, h: 50}, 80, 20, 640, 640),
+          topEdge:  placeLabel({x: 100, y: 5,   w: 50, h: 50}, 80, 20, 640, 640),
+          rightEdge: placeLabel({x: 600, y: 100, w: 40, h: 40}, 80, 20, 640, 640),
+        };
+    """)
+    assert placed["normal"] == {"x": 100, "y": 80}       # just above the box
+    assert placed["topEdge"] == {"x": 100, "y": 5}       # no room above: inside the box's top
+    assert placed["rightEdge"] == {"x": 560, "y": 80}    # pulled back so it isn't cut off
+
+
+@needs_node
+def test_label_and_table_formats(tmp_path):
+    out = run_js(tmp_path, """
+        const det = { defect_type: "Short", confidence: 0.8707, box: [136, 484, 192, 520] };
+        return [labelText(det), formatPercent(det.confidence, 1), formatBox(det.box)];
+    """)
+    assert out == ["Short 87%", "87.1%", "[136, 484, 192, 520]"]
+
+
+def test_result_area_has_canvas_table_and_no_defects_text(page):
+    assert '<canvas id="result-canvas"' in page
+    assert "<strong>No defects detected</strong>" in page
+    for heading in ("Defect", "Confidence", "Box [x1, y1, x2, y2] (px)"):
+        assert f"<th>{heading}</th>" in page
+    for fact in ("Processing time:", "Needs human review:"):
+        assert fact in page
+
+
+def test_results_are_never_inserted_as_html(page):
+    # Server text (defect names, error details) must go in as text, so it can't inject markup
+    assert "innerHTML" not in page.split("<script>")[1].replace("never innerHTML", "")
+
+
+@needs_node
+def test_labels_of_clustered_defects_do_not_cover_each_other(tmp_path):
+    # The real cluster from DeepPCB 01_PCB__10: Short, Mousebite and Spur within ~50 px
+    result = run_js(tmp_path, """
+        const boxes = [[136, 484, 192, 520], [187, 445, 220, 472], [137, 454, 176, 485]];
+        const items = boxes.map(([x1, y1, x2, y2]) => ({ box: {x: x1, y: y1, w: x2 - x1, h: y2 - y1}, w: 90, h: 20 }));
+        const spots = layoutLabels(items, 640, 640);
+        const rects = spots.map((s) => ({ x: s.x, y: s.y, w: 90, h: 20 }));
+        let overlapping = 0;
+        for (let i = 0; i < rects.length; i++)
+          for (let j = i + 1; j < rects.length; j++)
+            if (overlaps(rects[i], rects[j])) overlapping++;
+        const inside = rects.every((r) => r.x >= 0 && r.y >= 0 && r.x + r.w <= 640 && r.y + r.h <= 640);
+        return { overlapping, inside, first: spots[0] };
+    """)
+    assert result["overlapping"] == 0
+    assert result["inside"]
+    assert result["first"] == {"x": 136, "y": 464}    # the best detection keeps the spot right above its box

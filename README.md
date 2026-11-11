@@ -2,6 +2,8 @@
 
 **Try it in your browser:** [https://pcb-defect-auditor.onrender.com/demo](https://pcb-defect-auditor.onrender.com/demo). Upload a JPEG or PNG of a bare PCB and every detected defect is outlined on the image, with a results table. It works on phones.
 
+<!-- TODO: add demo GIF here -->
+
 **Live API:** [https://pcb-defect-auditor.onrender.com/docs](https://pcb-defect-auditor.onrender.com/docs)
 *(Speed: on a laptop CPU (Intel i7-1260P) one image takes 47 ms on average end to end: decoding, preprocessing, the model and NMS, not counting network or database time; see [Benchmark](#benchmark). The live site runs on Render's free tier, which has far less CPU, so a request there can take several seconds, especially right after the server wakes from sleep.)*
 

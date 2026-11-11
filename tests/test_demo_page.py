@@ -66,7 +66,7 @@ HARNESS = r"""
 const vm = require("vm");
 const fs = require("fs");
 const [script, testCode] = [fs.readFileSync(process.argv[2], "utf8"), fs.readFileSync(process.argv[3], "utf8")];
-const context = vm.createContext({ console, setTimeout, clearTimeout, AbortController });
+const context = vm.createContext({ console, setTimeout, clearTimeout, AbortController, FormData, Blob });
 vm.runInContext(script, context, { filename: "demo.html <script>" });
 Promise.resolve(vm.runInContext("(async () => {" + testCode + "})()", context))
   .then((result) => console.log(JSON.stringify(result === undefined ? null : result)))
@@ -151,3 +151,117 @@ def test_health_gives_up_when_the_time_runs_out(tmp_path):
     """)
     assert result["health"] is None
     assert result["ms"] < 2000            # gave up close to the 300 ms budget, didn't hang
+
+
+# ---------------------------------------------------------------- step: upload, samples, errors
+
+JPEG_START = [0xFF, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0]
+PNG_START = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+PDF_START = list(b"%PDF-1.4")
+
+
+@needs_node
+def test_upload_limit_matches_the_server(tmp_path):
+    assert run_js(tmp_path, "return MAX_UPLOAD_BYTES;") == main_module.MAX_UPLOAD_BYTES
+
+
+@needs_node
+@pytest.mark.parametrize("size, first_bytes, expected", [
+    (50_000, JPEG_START, None),
+    (50_000, PNG_START, None),
+    (10 * 1024 * 1024, JPEG_START, None),                     # exactly 10 MB is allowed
+    (10 * 1024 * 1024 + 1, JPEG_START, "the limit is 10 MB"),
+    (12_900_000, PNG_START, "That file is 12.3 MB"),
+    (0, [], "The file is empty"),
+    (50_000, PDF_START, "isn't a JPEG or PNG"),                # checked by content, not by name
+])
+def test_file_is_checked_before_upload(tmp_path, size, first_bytes, expected):
+    message = run_js(tmp_path, f"return checkFile({size}, {json.dumps(first_bytes)});")
+    if expected is None:
+        assert message is None
+    else:
+        assert expected in message
+
+
+@needs_node
+@pytest.mark.parametrize("status, body, expected", [
+    (400, {"detail": "The file looks like a JPEG but could not be decoded."}, "could not be decoded"),
+    (413, {"detail": "The image is 12000x12000 pixels; the limit is 25 megapixels."}, "12000x12000"),
+    (422, {"detail": [{"loc": ["body", "file"], "msg": "Field required"}]}, "request was incomplete"),
+    (500, None, "unexpected error"),
+    (503, {"detail": "The database is unavailable right now."}, "temporarily unavailable"),
+    (502, None, "temporarily unavailable"),
+    ("network", None, "Couldn't reach the server"),
+    ("timeout", None, "took too long"),
+    (418, None, "HTTP 418"),
+])
+def test_every_error_gets_a_plain_english_message(tmp_path, status, body, expected):
+    message = run_js(tmp_path, f"return errorMessage({json.dumps(status)}, {json.dumps(body)});")
+    assert expected in message
+    assert "loc" not in message and "[object" not in message   # never dumps raw error data
+
+
+def inspect_with(tmp_path, fake_response_js: str):
+    """Call inspectImage() with a fake fetch; return its outcome and what was sent."""
+    return run_js(tmp_path, f"""
+        let sent = null;
+        const fakeFetch = async (url, options) => {{
+          sent = {{ url, method: options.method, board_id: options.body.get("board_id"),
+                    filename: options.body.get("file").name }};
+          {fake_response_js}
+        }};
+        const outcome = await inspectImage(fakeFetch, new Blob(["x"]), "board.png", 500);
+        return {{ outcome, sent }};
+    """)
+
+
+@needs_node
+def test_inspect_sends_the_image_with_board_id_demo(tmp_path):
+    r = inspect_with(tmp_path, 'return { ok: true, status: 200, json: async () => ({ status: "success", telemetry: {} }) };')
+    assert r["sent"] == {"url": "/inspect", "method": "POST", "board_id": "demo", "filename": "board.png"}
+    assert r["outcome"]["ok"] is True
+
+
+@needs_node
+@pytest.mark.parametrize("fake_response_js, expected", [
+    ('return { ok: false, status: 413, json: async () => ({ detail: "The file is larger than the 10 MB limit." }) };',
+     "larger than the 10 MB limit"),
+    ('return { ok: false, status: 502, json: async () => { throw new SyntaxError("HTML page"); } };',
+     "temporarily unavailable"),                                   # host's HTML error page
+    ('throw new TypeError("Failed to fetch");', "Couldn't reach the server"),
+    ('return new Promise((_, reject) => options.signal.addEventListener("abort", () => reject(new Error("aborted"))));',
+     "took too long"),                                             # never answers -> 500 ms timeout
+    ('return { ok: true, status: 200, json: async () => { throw new SyntaxError("not JSON"); } };',
+     "couldn't read"),
+])
+def test_inspect_failures_become_messages_not_crashes(tmp_path, fake_response_js, expected):
+    r = inspect_with(tmp_path, fake_response_js)
+    assert r["outcome"]["ok"] is False
+    assert expected in r["outcome"]["message"]
+
+
+def test_no_samples_note_and_link(page):
+    note = re.search(r'<p id="no-samples-note" hidden>(.*?)</p>', page, re.S).group(1)
+    assert re.sub(r"<[^>]+>|\s+", " ", note).split() == (
+        "No sample board handy? Download test images from the DeepPCB dataset (research use only)".split())
+    assert '<a href="https://github.com/tangsanli5201/DeepPCB">' in note
+    assert '<section class="card" id="samples-section" hidden>' in page   # hidden until samples arrive
+
+
+def test_partial_success_notice(page):
+    assert "Result is valid; saving it to the database failed." in page
+
+
+def test_upload_box(page):
+    assert "Upload your own PCB image" in page
+    assert 'accept=".jpg,.jpeg,.png,image/jpeg,image/png"' in page
+
+
+def test_server_error_details_used_by_the_page_are_plain_english(tmp_path):
+    # The page shows the server's own "detail" for 400 and 413, so it must be a readable sentence
+    client = TestClient(main_module.app)
+    response = client.post("/inspect", data={"board_id": "demo"},
+                           files={"file": ("doc.pdf", b"%PDF-1.4 not an image", "application/pdf")})
+    assert response.status_code == 400
+    assert isinstance(response.json()["detail"], str)
+    assert response.json()["detail"].endswith(".")

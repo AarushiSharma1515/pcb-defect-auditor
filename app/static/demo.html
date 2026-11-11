@@ -99,7 +99,47 @@
     padding: 6px 14px;
     margin-top: 8px;
   }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
   [hidden] { display: none !important; }
+
+  /* Upload box */
+  .drop {
+    border: 2px dashed var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    text-align: center;
+  }
+  .drop.dragging { border-color: var(--accent); }
+  .drop input[type=file] { max-width: 100%; font: inherit; }
+  .hint { color: var(--muted); font-size: 0.875rem; margin: 8px 0 0; }
+
+  /* Sample thumbnails: as many columns as fit, at least two on a phone */
+  .samples {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 10px;
+  }
+  .sample {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    text-align: left;
+    font-size: 0.8rem;
+  }
+  .sample img { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; background: #000; }
+  .sample span { display: block; padding: 4px 6px; overflow-wrap: anywhere; }
+  .sample:hover, .sample:focus-visible { border-color: var(--accent); }
+
+  /* Messages */
+  .message { padding: 10px 12px; border-radius: 8px; margin: 12px 0 0; }
+  .message.error { background: var(--error-bg); color: var(--error-text); }
+  .message.warning { background: var(--warn-bg); color: var(--warn-text); }
+  .busy { display: flex; align-items: center; gap: 10px; color: var(--muted); }
+  .busy .spinner { margin-top: 0; }
 
   footer {
     color: var(--muted);
@@ -133,6 +173,37 @@
     </div>
   </section>
 
+  <section class="card">
+    <h2><label for="file-input">Upload your own PCB image</label></h2>
+    <div class="drop" id="drop-zone">
+      <input type="file" id="file-input" accept=".jpg,.jpeg,.png,image/jpeg,image/png">
+      <p class="hint">JPEG or PNG, up to 10 MB. You can also drag a file here.</p>
+    </div>
+    <p class="message error" id="upload-error" role="alert" hidden></p>
+  </section>
+
+  <section class="card" id="samples-section" hidden>
+    <h2>Or try a sample board</h2>
+    <div class="samples" id="samples-list"></div>
+  </section>
+
+  <p id="no-samples-note" hidden>
+    No sample board handy? <a href="https://github.com/tangsanli5201/DeepPCB">Download test images from the DeepPCB dataset (research use only)</a>
+  </p>
+
+  <section class="card" id="results" hidden aria-live="polite">
+    <h2>Result</h2>
+    <div class="busy" id="busy" hidden>
+      <div class="spinner" aria-hidden="true"></div>
+      <p>Inspecting… (the first inspection after the server wakes up can take a little longer)</p>
+    </div>
+    <p class="message error" id="inspect-error" role="alert" hidden></p>
+    <p class="message warning" id="partial-notice" hidden>Result is valid; saving it to the database failed.</p>
+    <div id="result-body" hidden>
+      <p id="result-summary"></p>
+    </div>
+  </section>
+
   <footer>
     Trained on DeepPCB (Kaggle repackaging, 1,200/150/150 split). Not validated on real factory images.
   </footer>
@@ -146,6 +217,9 @@ const HEALTH_TIMEOUT_MS = 60000;      // free hosting can take up to a minute to
 const HEALTH_RETRY_DELAY_MS = 2000;   // wait between attempts while it is waking
 const WAKING_MESSAGE =
   "Waking up the server (free hosting sleeps when idle). This can take up to 60 seconds.";
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;   // same limit as the server (app/main.py)
+const INSPECT_TIMEOUT_MS = 90000;            // the first inspection after waking can be slow
+const BOARD_ID = "demo";
 
 // ---------------------------------------------------------------- pure helpers
 // (No page access in here, so tests can run them in Node.)
@@ -164,6 +238,89 @@ function describeHealth(health) {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** "JPEG", "PNG" or null, from the file's first bytes (the same check the server does). */
+function imageFormat(firstBytes) {
+  const starts = (sig) => sig.every((byte, i) => firstBytes[i] === byte);
+  if (starts([0xff, 0xd8, 0xff])) return "JPEG";
+  if (starts([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "PNG";
+  return null;
+}
+
+/** Check a chosen file before uploading it. Returns an error message, or null if it's fine. */
+function checkFile(size, firstBytes) {
+  if (size === 0) return "The file is empty. Please choose a JPEG or PNG image.";
+  if (size > MAX_UPLOAD_BYTES) {
+    return "That file is " + (size / 1024 / 1024).toFixed(1) + " MB; the limit is 10 MB. " +
+           "Please choose a smaller image.";
+  }
+  if (!imageFormat(firstBytes)) {
+    return "That file isn't a JPEG or PNG image. Please choose a .jpg or .png file.";
+  }
+  return null;
+}
+
+/**
+ * A plain-English message for a failed /inspect call.
+ * status: the HTTP status, or "network" (no connection) / "timeout" (took too long).
+ * body: the parsed JSON error body, if there was one.
+ */
+function errorMessage(status, body) {
+  const detail = body && typeof body.detail === "string" ? body.detail : "";
+  switch (status) {
+    case "network":
+      return "Couldn't reach the server. Check your internet connection; if the server " +
+             "was asleep, wait a moment and try again.";
+    case "timeout":
+      return "The server took too long to answer. It may still be waking up; please try again.";
+    case 400:
+      return "The server couldn't use that image. " +
+             (detail || "Please upload a valid JPEG or PNG image.");
+    case 413:
+      return "The image is too large. " +
+             (detail || "The limits are 10 MB and 25 megapixels.");
+    case 422:
+      return "The request was incomplete (for example, the image or board ID was missing). " +
+             "Please choose the image again.";
+    case 500:
+      return "The server hit an unexpected error while inspecting the image. Please try " +
+             "again; if it keeps happening, try a different image.";
+    case 502:
+    case 503:
+    case 504:
+      return "The server is temporarily unavailable (it may still be starting up, or its " +
+             "database may be down). Please try again in a minute.";
+    default:
+      return "Something went wrong (HTTP " + status + "). Please try again.";
+  }
+}
+
+/**
+ * Send one image to POST /inspect. Never throws: resolves with
+ * {ok: true, result} or {ok: false, message} (a plain-English error).
+ */
+async function inspectImage(fetchFn, blob, filename, timeoutMs = INSPECT_TIMEOUT_MS) {
+  const form = new FormData();
+  form.append("board_id", BOARD_ID);
+  form.append("file", blob, filename);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let response;
+  try {
+    response = await fetchFn("/inspect", { method: "POST", body: form, signal: controller.signal });
+  } catch (error) {
+    return { ok: false, message: errorMessage(controller.signal.aborted ? "timeout" : "network") };
+  } finally {
+    clearTimeout(timer);
+  }
+  let body = null;
+  try { body = await response.json(); } catch (error) { /* not JSON, e.g. an HTML error page */ }
+  if (!response.ok) return { ok: false, message: errorMessage(response.status, body) };
+  if (!body || !body.telemetry) {
+    return { ok: false, message: "The server sent a reply this page couldn't read. Please try again." };
+  }
+  return { ok: true, result: body };
+}
 
 /**
  * Ask /health until it answers 200 or the time budget runs out.
@@ -225,6 +382,136 @@ function startPage() {
         "If it keeps failing, check your internet connection.";
       status.retry.hidden = false;
     }
+    loadSamples();
+  }
+
+  // ---- samples: thumbnails if the server has any, otherwise the DeepPCB note
+  let samplesLoaded = false;
+  async function loadSamples() {
+    if (samplesLoaded) return;
+    let names = [];
+    try {
+      const response = await fetch("/samples", { cache: "no-store" });
+      if (response.ok) names = await response.json();
+      samplesLoaded = response.ok;
+    } catch (error) { /* treat like "no samples" */ }
+    names = Array.isArray(names) ? names.filter((n) => typeof n === "string") : [];
+
+    const list = $("samples-list");
+    list.replaceChildren();
+    for (const name of names) {
+      const url = "/samples/" + encodeURIComponent(name);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "sample";
+      const img = document.createElement("img");
+      img.src = url;
+      img.alt = "";
+      img.loading = "lazy";
+      const label = document.createElement("span");
+      label.textContent = name;
+      button.append(img, label);
+      button.addEventListener("click", () => inspectSample(url, name));
+      list.append(button);
+    }
+    $("samples-section").hidden = names.length === 0;
+    $("no-samples-note").hidden = names.length > 0;
+  }
+
+  async function inspectSample(url, name) {
+    let blob;
+    try {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      blob = await response.blob();
+    } catch (error) {
+      showError("Couldn't load that sample image from the server. Please try again.");
+      return;
+    }
+    run(blob, name);
+  }
+
+  // ---- upload: check the file in the browser first, then send it
+  const fileInput = $("file-input");
+  const uploadError = $("upload-error");
+
+  async function handleFile(file) {
+    uploadError.hidden = true;
+    if (!file) return;
+    const firstBytes = new Uint8Array(await file.slice(0, 8).arrayBuffer());
+    const problem = checkFile(file.size, firstBytes);
+    if (problem) {
+      uploadError.textContent = problem;
+      uploadError.hidden = false;
+      return;
+    }
+    run(file, file.name);
+  }
+
+  fileInput.addEventListener("change", () => {
+    handleFile(fileInput.files[0]);
+    fileInput.value = "";   // so choosing the same file again still triggers "change"
+  });
+  const drop = $("drop-zone");
+  drop.addEventListener("dragover", (event) => { event.preventDefault(); drop.classList.add("dragging"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("dragging"));
+  drop.addEventListener("drop", (event) => {
+    event.preventDefault();
+    drop.classList.remove("dragging");
+    handleFile(event.dataTransfer.files[0]);
+  });
+
+  // ---- inspecting and showing the result
+  const results = {
+    box: $("results"), busy: $("busy"), error: $("inspect-error"),
+    partial: $("partial-notice"), body: $("result-body"), summary: $("result-summary"),
+  };
+  let busy = false;
+
+  function setBusy(on) {
+    busy = on;
+    results.busy.hidden = !on;
+    fileInput.disabled = on;
+    for (const button of document.querySelectorAll(".sample")) button.disabled = on;
+  }
+
+  function showError(message) {
+    results.box.hidden = false;
+    results.body.hidden = true;
+    results.partial.hidden = true;
+    results.error.textContent = message;
+    results.error.hidden = false;
+  }
+
+  async function run(blob, filename) {
+    if (busy) return;
+    results.box.hidden = false;
+    results.error.hidden = true;
+    results.partial.hidden = true;
+    results.body.hidden = true;
+    setBusy(true);
+    results.box.scrollIntoView({ behavior: "smooth", block: "start" });
+    try {
+      const outcome = await inspectImage(window.fetch.bind(window), blob, filename);
+      if (!outcome.ok) {
+        showError(outcome.message);
+        return;
+      }
+      await showResult(outcome.result, blob);
+    } catch (error) {
+      showError("Something went wrong while showing the result. Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function showResult(result, blob) {
+    results.partial.hidden = result.status !== "partial_success";
+    const detections = Array.isArray(result.detections) ? result.detections : [];
+    results.summary.textContent = detections.length
+      ? "Found " + detections.length + " defect" + (detections.length === 1 ? "" : "s") + "."
+      : "No defects detected";
+    results.body.hidden = false;
   }
 
   status.retry.addEventListener("click", checkServer);

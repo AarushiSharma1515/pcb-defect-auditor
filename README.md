@@ -104,6 +104,8 @@ Trained YOLOv8n for 99 epochs on DeepPCB (early-stopped from a 100-epoch budget,
 
 Full numbers and raw per-epoch log: `docs/training_results/metrics.md` and `results.csv`.
 
+These tables are the notebook's final check of the PyTorch weights (`best.pt`). `scripts/evaluate.py` scores the exported ONNX model that the API actually serves, on the same test split, and gets slightly different numbers (P 0.976, R 0.943, mAP50 0.978, mAP50-95 0.799); those, the `valid` split and the API-threshold scores are in [docs/evaluation.md](docs/evaluation.md).
+
 ### Confusion matrix
 
 ![Confusion Matrix](docs/training_results/confusion_matrix_normalized.png)

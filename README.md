@@ -35,7 +35,7 @@ Neon Postgres — inspections table (one row: the top defect)
 ```
 
 - **Inference:** YOLOv8n, fine-tuned on DeepPCB, exported to ONNX (11.7MB) so the API doesn't need a full PyTorch runtime to serve predictions.
-- **Backend:** FastAPI with SQLAlchemy ORM, async endpoints.
+- **Backend:** FastAPI with SQLAlchemy ORM. `/inspect` is a plain (not `async`) function on purpose: the ONNX model and the database write both block, so FastAPI runs it in its thread pool and a slow request can't hold up the others.
 - **Storage:** Neon (serverless Postgres) — chosen specifically to sidestep local Docker setup issues during development, and it turned out to be a genuinely good fit for a small project like this.
 
 ---
@@ -112,20 +112,25 @@ The diagonal is strong across every class (0.92–0.99) — the model isn't conf
 pcb-defect-auditor/
 ├── .github/workflows/       # CI pipeline definitions
 ├── app/
-│   ├── api/                 # API route definitions
-│   ├── core/                # Config, environment settings
-│   ├── db/                  # SQLAlchemy models, database connection
-│   ├── ml/                  # ONNX inference session, preprocessing, NMS
-│   └── main.py               # FastAPI application entrypoint
-├── docs/training_results/    # Confusion matrix, PR curve, training metrics
+│   ├── main.py               # FastAPI app: every endpoint lives here
+│   ├── static/demo.html      # The /demo page (one file, inline CSS and JavaScript)
+│   ├── db/                   # SQLAlchemy models, database connection
+│   ├── ml/                   # ONNX inference session, preprocessing, NMS, upload checks
+│   ├── api/, core/           # Empty placeholders, not used yet
+│   └── __init__.py           # App version, reported by /health
+├── docs/                     # Evaluation and benchmark write-ups, training results
 ├── models/
 │   └── pcb_defect_v1.onnx    # Exported YOLOv8 weights (committed — see note below)
-├── notebooks/                 # Full training notebook
+├── notebooks/                # Full training notebook
+├── samples/                  # Demo images, local only (README.md explains)
 ├── scripts/
-│   └── convert_labels.py     # Fixes a labeling issue found in the raw dataset
+│   ├── convert_labels.py     # Fixes a labeling issue found in the raw dataset
+│   ├── evaluate.py           # Precision/recall/mAP of the ONNX model on DeepPCB splits
+│   ├── benchmark.py          # CPU inference speed of the ONNX model
+│   └── pick_samples.py       # Copies one validation image per class into samples/
 ├── sql/
 │   ├── schema.sql
-│   └── analytics.sql         # Queries for the planned /analytics/summary endpoint
+│   └── analytics.sql         # Hand-written analysis queries (not run by the app)
 ├── tests/
 ├── Dockerfile
 ├── requirements.txt
@@ -152,7 +157,7 @@ Getting to a working model took two failed attempts before this one worked, and 
 
 ## CI/CD & deployment
 
-- **Testing:** GitHub Actions runs the `pytest` suite on Ubuntu, using a mocked in-memory SQLite database and a mocked inference call — no live database or model weights required for the test suite itself to pass.
+- **Testing:** on every push to `main`, GitHub Actions runs the `pytest` suite on Ubuntu, then test-builds the Docker image. The tests use temporary SQLite databases, never a live one. Some use a fake model to control the output; others run the real committed ONNX model. The demo page's JavaScript is tested with Node.js, which GitHub's runners include. Branches are not tested in CI until they are merged.
 - **Deployment:** Render pulls this repository directly and builds the Docker image from the committed `Dockerfile`, then runs Uvicorn. This has been verified against a live, successful deploy — see the live link above.
 
 ---

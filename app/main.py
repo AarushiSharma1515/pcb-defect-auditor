@@ -2,19 +2,22 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, File, UploadFile, Form, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
+from app import __version__
 from app.db.database import get_db, engine, Base
 from app.db.models import Inspection
-from app.ml.inference import PCBDefectModel
+from app.ml.inference import DEFAULT_MODEL_PATH, PCBDefectModel
 from app.ml.image_checks import detect_image_format, read_image_size
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024   # 10 MB
 MAX_PIXELS = 25_000_000               # 25 megapixels (e.g. 5000 x 5000)
+HEALTH_DB_TIMEOUT_SECONDS = 2.0       # /health reports "unreachable" if SELECT 1 takes longer
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +39,7 @@ async def lifespan(app: FastAPI):
     yield
     ml_engine.clear()
 
-app = FastAPI(title="PCB Defect Auditor", lifespan=lifespan)
+app = FastAPI(title="PCB Defect Auditor", version=__version__, lifespan=lifespan)
 
 
 def save_inspection(db: Session, record: dict) -> bool:
@@ -68,6 +71,44 @@ def save_inspection(db: Session, record: dict) -> bool:
 @app.get("/")
 def root():
     return {"status": "PCB Defect Auditor is running"}
+
+
+# Two small background threads for the /health database check. Running SELECT 1 there lets
+# /health stop waiting after HEALTH_DB_TIMEOUT_SECONDS, even if the database hangs instead
+# of refusing the connection. (A stuck check still ends on its own when Postgres's 5 s
+# connect_timeout expires, and only two can run at once, so they can't pile up threads.)
+_health_db_checker = ThreadPoolExecutor(max_workers=2, thread_name_prefix="health-db")
+
+
+def _select_one():
+    with engine.connect() as connection:
+        connection.execute(text("SELECT 1"))
+
+
+def check_database() -> str:
+    """'ok' if the database answers SELECT 1 within the timeout, otherwise 'unreachable'.
+    Never raises: a health check must not crash because the thing it checks is down."""
+    try:
+        _health_db_checker.submit(_select_one).result(timeout=HEALTH_DB_TIMEOUT_SECONDS)
+        return "ok"
+    except Exception as e:   # connection refused, bad credentials, timeout, anything else
+        logger.warning("Health check: database unreachable: %s", e or type(e).__name__)
+        return "unreachable"
+
+
+@app.get("/health")
+def health():
+    """Always 200, so a monitor can read the details; check the fields to see what's wrong.
+    Plain "def": the database check blocks, so FastAPI runs this in the thread pool."""
+    model = ml_engine.get("model")
+    model_loaded = isinstance(model, PCBDefectModel)
+    return {
+        "model_loaded": model_loaded,
+        "model_file": (model.model_path if model_loaded else DEFAULT_MODEL_PATH).name,
+        "mode": "onnx",
+        "database": check_database(),
+        "version": __version__,
+    }
 
 @app.exception_handler(OperationalError)
 async def database_unavailable(request: Request, exc: OperationalError):

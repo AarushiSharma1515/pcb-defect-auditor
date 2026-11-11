@@ -260,6 +260,9 @@
 // ---------------------------------------------------------------- settings
 const HEALTH_TIMEOUT_MS = 60000;      // free hosting can take up to a minute to wake up
 const HEALTH_RETRY_DELAY_MS = 2000;   // wait between attempts while it is waking
+const DB_RECHECK_ATTEMPTS = 6;        // if the database isn't answering yet, ask again...
+const DB_RECHECK_DELAY_MS = 5000;     // ...every 5 s (about half a minute in all)
+const DB_RECHECK_TIMEOUT_MS = 15000;  // one re-check request may take this long
 const WAKING_MESSAGE =
   "Waking up the server (free hosting sleeps when idle). This can take up to 60 seconds.";
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;   // same limit as the server (app/main.py)
@@ -288,7 +291,8 @@ function describeHealth(health) {
     notes.push("The model is not loaded on the server, so inspections will fail.");
   }
   if (health && health.database !== "ok") {
-    notes.push("The database is unreachable: results will be shown but not saved.");
+    notes.push("The database isn't answering yet (it may still be waking up). You can still " +
+               "inspect images; while it's down, results are shown but not saved.");
   }
   const version = health && health.version ? "Server version " + health.version + "." : "";
   return { headline: "Ready", detail: [version].concat(notes).filter(Boolean).join(" ") };
@@ -495,6 +499,32 @@ async function waitForHealth(fetchFn, timeoutMs, retryDelayMs = HEALTH_RETRY_DEL
   return null;
 }
 
+/**
+ * The server is up but its database isn't answering yet (e.g. a sleeping database waking up).
+ * Ask /health again every delayMs, up to `attempts` times. Resolves with the first /health
+ * reply whose database is "ok", or null if it never became ok. Failed requests are skipped.
+ */
+async function waitForDatabase(fetchFn, attempts = DB_RECHECK_ATTEMPTS,
+                               delayMs = DB_RECHECK_DELAY_MS, timeoutMs = DB_RECHECK_TIMEOUT_MS) {
+  for (let i = 0; i < attempts; i++) {
+    await sleep(delayMs);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetchFn("/health", { signal: controller.signal, cache: "no-store" });
+      if (response.ok) {
+        const health = await response.json();
+        if (health && health.database === "ok") return health;
+      }
+    } catch (error) {
+      // try again on the next round
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------- page
 function startPage() {
   const $ = (id) => document.getElementById(id);
@@ -523,6 +553,7 @@ function startPage() {
       status.box.className = "status ready";
       status.headline.textContent = text.headline;
       status.detail.textContent = text.detail;
+      if (health.database !== "ok") recheckDatabase();   // in the background; samples still load
     } else {
       status.box.className = "status failed";
       status.headline.textContent = "The server didn't respond within 60 seconds.";
@@ -532,6 +563,14 @@ function startPage() {
       status.retry.hidden = false;
     }
     loadSamples();
+  }
+
+  // Once the database answers, replace the "isn't answering yet" note with the normal text
+  async function recheckDatabase() {
+    const health = await waitForDatabase(window.fetch.bind(window));
+    if (health && status.box.className === "status ready") {
+      status.detail.textContent = describeHealth(health).detail;
+    }
   }
 
   // ---- samples: thumbnails if the server has any, otherwise the DeepPCB note

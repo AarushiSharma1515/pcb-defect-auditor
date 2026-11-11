@@ -11,13 +11,16 @@ DEFAULT_MODEL_PATH = Path(__file__).resolve().parents[2] / "models" / "pcb_defec
 
 MODEL_SIZE = 640  # the model's input is MODEL_SIZE x MODEL_SIZE pixels
 
+# Must exactly match the class order used in data.yaml during training.
+# (DeepPCB label files number these 1-6, in the same order.)
+DEFECT_CLASSES = ["Open", "Short", "Mousebite", "Spur", "Copper", "Pin-hole"]
+
 
 class PCBDefectModel:
     def __init__(self, model_path=DEFAULT_MODEL_PATH):
         self.model_path = Path(model_path)
 
-        # Must exactly match the class order used in data.yaml during training
-        self.defect_classes = ["Open", "Short", "Mousebite", "Spur", "Copper", "Pin-hole"]
+        self.defect_classes = DEFECT_CLASSES
 
         # No model, no service: stop with a clear error instead of returning made-up predictions
         if not self.model_path.is_file():

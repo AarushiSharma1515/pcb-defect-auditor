@@ -11,14 +11,17 @@ from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 from app import __version__
-from app.db.database import get_db, engine, Base
+from app.db.database import DB_CONNECT_TIMEOUT_SECONDS, get_db, engine, Base
 from app.db.models import Inspection
 from app.ml.inference import DEFAULT_MODEL_PATH, PCBDefectModel
 from app.ml.image_checks import detect_image_format, read_image_size
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024   # 10 MB
 MAX_PIXELS = 25_000_000               # 25 megapixels (e.g. 5000 x 5000)
-HEALTH_DB_TIMEOUT_SECONDS = 2.0       # /health reports "unreachable" if SELECT 1 takes longer
+# /health reports "unreachable" if SELECT 1 takes longer than this. A sleeping Neon database
+# can take several seconds to wake, so allow the full connect timeout plus a moment for the
+# query; otherwise the first /health after a quiet spell wrongly says "unreachable".
+HEALTH_DB_TIMEOUT_SECONDS = DB_CONNECT_TIMEOUT_SECONDS + 1.0
 
 # Demo images served by /samples, found relative to this file (app/main.py -> repo root)
 SAMPLES_DIR = Path(__file__).resolve().parents[1] / "samples"
@@ -190,22 +193,28 @@ def list_inspections(
 
 @app.get("/analytics/summary", responses=DATABASE_DOWN)
 def get_analytics_summary(db: Session = Depends(get_db)):
+    # Visitors' uploads on /demo (board_id "demo") aren't real inspections, so they are left
+    # out of every number here; how many were left out is reported separately.
+    # (/inspections still lists every row, demo ones included.)
+    not_demo = Inspection.board_id != DEMO_BOARD_ID
+
     # 1. Get total inspections
-    total = db.query(Inspection).count()
-    
+    total = db.query(Inspection).filter(not_demo).count()
+
     # 2. Get average confidence across all runs
-    avg_conf = db.query(func.avg(Inspection.confidence)).scalar() or 0.0
-    
+    avg_conf = db.query(func.avg(Inspection.confidence)).filter(not_demo).scalar() or 0.0
+
     # 3. Get count breakdown by defect type
     breakdown = db.query(
-        Inspection.defect_type, 
+        Inspection.defect_type,
         func.count(Inspection.id)
-    ).group_by(Inspection.defect_type).all()
-    
+    ).filter(not_demo).group_by(Inspection.defect_type).all()
+
     return {
         "total_inspections": total,
         "average_confidence": round(avg_conf, 4),
-        "defect_breakdown": {row[0]: row[1] for row in breakdown}
+        "defect_breakdown": {row[0]: row[1] for row in breakdown},
+        "demo_inspections_excluded": db.query(Inspection).filter(Inspection.board_id == DEMO_BOARD_ID).count(),
     }
 
 @app.post("/inspect", responses={

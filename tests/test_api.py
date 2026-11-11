@@ -534,3 +534,42 @@ def test_demo_file_name_is_not_printed_when_saving_fails(client, capsys):
     assert response.json()["status"] == "partial_success"
     assert "demo-upload" in printed           # the error really did print the values...
     assert SECRET_NAME not in printed         # ...but not the visitor's file name
+
+
+# ---------------------------------------------------------------- demo rows left out of analytics
+
+def add_inspection(board_id, defect_type, confidence):
+    with TestingSessionLocal() as db:
+        db.add(Inspection(board_id=board_id, image_path="x.jpg", defect_type=defect_type,
+                          confidence=confidence, processing_ms=10))
+        db.commit()
+
+
+def test_analytics_summary_leaves_out_demo_inspections(client):
+    before = client.get("/analytics/summary").json()
+
+    add_inspection("demo", "OnlyInDemo", 0.0001)     # visitors' uploads: must not count
+    add_inspection("demo", "OnlyInDemo", 0.0001)
+    add_inspection("LINE-9", "RealDefectX", 0.9)     # a real inspection: must count
+
+    after = client.get("/analytics/summary").json()
+    assert after["total_inspections"] == before["total_inspections"] + 1
+    assert "OnlyInDemo" not in after["defect_breakdown"]
+    assert after["defect_breakdown"]["RealDefectX"] == 1
+    assert after["demo_inspections_excluded"] == before["demo_inspections_excluded"] + 2
+
+    # The average is over non-demo rows only (the 0.0001 demo rows would pull it down)
+    with TestingSessionLocal() as db:
+        real = [float(r.confidence) for r in db.query(Inspection) if r.board_id != "demo"]
+    assert after["average_confidence"] == pytest.approx(round(sum(real) / len(real), 4))
+
+
+def test_analytics_summary_keeps_its_existing_fields(client):
+    body = client.get("/analytics/summary").json()
+    assert {"total_inspections", "average_confidence", "defect_breakdown"} <= set(body)
+
+
+def test_inspections_list_still_shows_demo_rows(client):
+    add_inspection("demo", "ListedDemo", 0.5)
+    listed = client.get("/inspections?limit=200").json()
+    assert any(row["board_id"] == "demo" and row["defect_type"] == "ListedDemo" for row in listed)

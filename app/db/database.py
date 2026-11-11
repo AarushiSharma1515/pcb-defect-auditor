@@ -19,9 +19,10 @@ DATABASE_URL = os.getenv(
 #   pool_recycle=300   -> never reuse a connection that is older than 5 minutes
 #   connect_timeout=5  -> give up opening a new connection after 5 seconds
 #                         (a Postgres-only option, so SQLite, used in tests, skips it)
+DB_CONNECT_TIMEOUT_SECONDS = 5
 connect_args = {}
 if make_url(DATABASE_URL).get_backend_name() == "postgresql":
-    connect_args["connect_timeout"] = 5
+    connect_args["connect_timeout"] = DB_CONNECT_TIMEOUT_SECONDS
 
 engine = create_engine(
     DATABASE_URL,

@@ -73,3 +73,27 @@ def test_health_reports_when_the_model_is_not_loaded(monkeypatch):
     assert response.json()["model_loaded"] is False
     assert response.json()["model_file"] == "pcb_defect_v1.onnx"   # the file it expects
     assert response.json()["mode"] == "onnx"
+
+
+class SlowWakingEngine:
+    """A database that answers, but only after a few seconds (like a Neon database waking up)."""
+    def __init__(self, real_engine, delay_seconds):
+        self.real_engine = real_engine
+        self.delay_seconds = delay_seconds
+
+    def connect(self):
+        time.sleep(self.delay_seconds)
+        return self.real_engine.connect()
+
+
+def test_health_waits_for_a_database_that_is_waking_up(client, monkeypatch):
+    # 2.5 s: longer than the old 2 s limit, which wrongly reported "unreachable" on a cold start
+    monkeypatch.setattr(main_module, "engine", SlowWakingEngine(main_module.engine, 2.5))
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json()["database"] == "ok"
+
+
+def test_health_waits_at_least_as_long_as_a_database_connection_may_take():
+    from app.db.database import DB_CONNECT_TIMEOUT_SECONDS
+    assert main_module.HEALTH_DB_TIMEOUT_SECONDS > DB_CONNECT_TIMEOUT_SECONDS

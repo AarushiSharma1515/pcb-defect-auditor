@@ -113,7 +113,7 @@ def test_health_timeout_is_60_seconds(tmp_path):
 @pytest.mark.parametrize("health, expected_detail", [
     ({"model_loaded": True, "database": "ok", "version": "1.1.0"}, "Server version 1.1.0."),
     ({"model_loaded": False, "database": "ok", "version": "1.1.0"}, "model is not loaded"),
-    ({"model_loaded": True, "database": "unreachable", "version": "1.1.0"}, "database is unreachable"),
+    ({"model_loaded": True, "database": "unreachable", "version": "1.1.0"}, "may still be waking up"),
 ])
 def test_ready_message_from_health(tmp_path, health, expected_detail):
     text = run_js(tmp_path, f"return describeHealth({json.dumps(health)});")
@@ -372,3 +372,53 @@ def test_privacy_notice_under_the_upload_box(page):
 @needs_node
 def test_page_uses_the_board_id_the_server_treats_as_demo(tmp_path):
     assert run_js(tmp_path, "return BOARD_ID;") == main_module.DEMO_BOARD_ID
+
+
+# ---------------------------------------------------------------- database waking up
+
+@needs_node
+def test_database_note_is_worded_as_temporary(tmp_path):
+    detail = run_js(tmp_path, 'return describeHealth({model_loaded: true, database: "unreachable"}).detail;')
+    assert detail == ("The database isn't answering yet (it may still be waking up). You can still "
+                      "inspect images; while it's down, results are shown but not saved.")
+
+
+def fake_health_sequence_js(replies):
+    """A fake fetch that answers /health with each reply in turn ("fail" = network error)."""
+    return f"""
+        const replies = {json.dumps(replies)};
+        let calls = 0;
+        const fakeFetch = async () => {{
+          const reply = replies[Math.min(calls, replies.length - 1)];
+          calls += 1;
+          if (reply === "fail") throw new TypeError("Failed to fetch");
+          return {{ ok: true, json: async () => reply }};
+        }};
+    """
+
+
+@needs_node
+def test_recheck_stops_as_soon_as_the_database_answers(tmp_path):
+    result = run_js(tmp_path, fake_health_sequence_js([
+        {"database": "unreachable"}, "fail", {"database": "ok", "model_loaded": True},
+        {"database": "unreachable"},            # never reached
+    ]) + """
+        const health = await waitForDatabase(fakeFetch, 6, 10, 1000);
+        return { health, calls };
+    """)
+    assert result == {"health": {"database": "ok", "model_loaded": True}, "calls": 3}
+
+
+@needs_node
+def test_recheck_gives_up_after_its_attempts(tmp_path):
+    result = run_js(tmp_path, fake_health_sequence_js([{"database": "unreachable"}]) + """
+        const health = await waitForDatabase(fakeFetch, 4, 10, 1000);
+        return { health, calls };
+    """)
+    assert result == {"health": None, "calls": 4}
+
+
+@needs_node
+def test_recheck_settings(tmp_path):
+    # About half a minute in all: 6 tries, 5 s apart
+    assert run_js(tmp_path, "return [DB_RECHECK_ATTEMPTS, DB_RECHECK_DELAY_MS];") == [6, 5000]

@@ -75,12 +75,18 @@ def test_readme_has_the_exact_credit_line():
     readme = pick_samples.README_TEXT
     assert pick_samples.CREDIT_LINE in readme
     assert "https://github.com/tangsanli5201/DeepPCB" in readme
-    assert '"On-line PCB Defect Detector On A New PCB Defect Dataset"' in readme
+    assert "'On-line PCB Defect Detector On A New PCB Defect Dataset'" in readme
     assert "may only be used for research purposes" in readme
     assert "The current version of this repository contains no dataset images." in readme
     assert "redistributed" not in readme       # the images remain in git history, so don't claim that
-    assert "intentionally empty" in readme
-    assert "Tang et al" not in readme
+    assert "intentionally empty in the repo" in readme
+    assert "for demos only" in readme
+    assert "et al" not in readme                # credit by repo URL and paper title, not author citation
+
+
+def test_main_readme_has_the_same_credit_line():
+    main_readme = (SCRIPT.parents[1] / "README.md").read_text(encoding="utf-8")
+    assert pick_samples.CREDIT_LINE in main_readme
 
 
 def test_committed_readme_matches_what_the_script_writes():

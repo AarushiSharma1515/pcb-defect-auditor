@@ -1,5 +1,7 @@
 # PCB Defect Auditor
 
+**Try it in your browser:** [https://pcb-defect-auditor.onrender.com/demo](https://pcb-defect-auditor.onrender.com/demo). Upload a JPEG or PNG of a bare PCB and every detected defect is outlined on the image, with a results table. It works on phones.
+
 **Live API:** [https://pcb-defect-auditor.onrender.com/docs](https://pcb-defect-auditor.onrender.com/docs)
 *(Hosted on Render's free tier — the first request may take 15–60 seconds to wake the service from sleep. Subsequent requests process in ~3.2–4.2 seconds.)*
 
@@ -24,10 +26,12 @@ OpenCV preprocessing (resize, normalize, transpose)
 ONNX Runtime inference (YOLOv8, CPU)
       │
       ▼
-NMS + confidence filtering → defect_type, confidence
+NMS + confidence filtering → every detection: type, confidence, box
+      │
+      ├──▶ Response: all detections, boxes scaled back to the original image's pixels
       │
       ▼
-Neon Postgres — inspections table
+Neon Postgres — inspections table (one row: the top defect)
 ```
 
 - **Inference:** YOLOv8n, fine-tuned on DeepPCB, exported to ONNX (11.7MB) so the API doesn't need a full PyTorch runtime to serve predictions.
@@ -166,17 +170,30 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Create a `.env` file in the root:
+Choose a database. To use Postgres (e.g. Neon), create a `.env` file in the root:
 ```env
 DATABASE_URL=postgresql://<user>:<password>@<neon-host>/<dbname>?sslmode=require
 ```
-(The model path is hardcoded to `models/pcb_defect_v1.onnx` in `inference.py` — no environment variable needed for it.)
+Or, to try it without any database server, use a local SQLite file instead. It keeps test uploads out of your real database:
+```bash
+export DATABASE_URL=sqlite:///./local.db          # Linux/macOS
+$env:DATABASE_URL = "sqlite:///./local.db"        # Windows PowerShell
+```
+(A `DATABASE_URL` already set in your environment wins over `.env`. The model path is resolved from the code, `models/pcb_defect_v1.onnx`, so no setting is needed for it.)
 
 Run it:
 ```bash
 uvicorn app.main:app --reload
 ```
-Then open `http://127.0.0.1:8000/docs` for the interactive API.
+Then open `http://127.0.0.1:8000/demo` for the demo page, or `http://127.0.0.1:8000/docs` for the interactive API.
+
+Optional: to get clickable sample boards on the demo page, put the Kaggle repackaging's validation split at `data/DeepPCB/valid/` (with its `images/` and `labels/` folders) and run `python scripts/pick_samples.py`. It copies one validation image per defect class into `samples/`. Those copies are ignored by git and Docker and stay on your machine (see `samples/README.md`).
+
+Run the tests:
+```bash
+pytest -q
+```
+They use a temporary SQLite database, never the one in `.env`. The demo page's JavaScript tests need Node.js and are skipped without it.
 
 ---
 
